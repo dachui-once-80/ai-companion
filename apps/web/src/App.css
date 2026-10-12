@@ -1,0 +1,1288 @@
+/* =========================================
+   阿七 AI Companion — App.css
+   深色玻璃风格 + 情绪系统 + 生命感动画
+   ========================================= */
+
+/* ---------- 全局基础 ---------- */
+
+:root {
+  font-family:
+    Inter, "PingFang SC", "Microsoft YaHei",
+    -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #eeeaf7;
+  background: #101015;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #b4a0ff;
+  outline-offset: 3px;
+}
+
+/* ---------- 页面框架 ---------- */
+
+.app-shell {
+  min-height: 100vh;
+  padding: 0 5%;
+  color: #eeeaf7;
+  background:
+    radial-gradient(ellipse at 16% 10%, #28223e 0, transparent 35%),
+    radial-gradient(ellipse at 85% 70%, #1e2936 0, transparent 32%),
+    #101015;
+}
+
+.topbar {
+  height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #ffffff12;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #f5f0ff;
+  text-decoration: none;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.brand small {
+  display: block;
+  margin-top: 3px;
+  color: #827b99;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 2px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid #b7a2f45c;
+  border-radius: 13px;
+  background: linear-gradient(145deg, #9b83e633, #7161ad18);
+  color: #c5b4ff;
+}
+
+.topbar-caption {
+  color: #8c879a;
+  font-size: 13px;
+}
+
+.dashboard {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.75fr) minmax(0, 1.6fr);
+  gap: 28px;
+  max-width: 1440px;
+  margin: 36px auto 48px;
+  align-items: start;
+}
+
+.companion-panel,
+.memory-panel {
+  border: 1px solid #ffffff12;
+  border-radius: 24px;
+  background: #19191fdb;
+  box-shadow: 0 24px 80px #00000020;
+}
+
+.companion-panel {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 34px 25px 28px;
+  text-align: center;
+}
+
+.eyebrow {
+  color: #a99ad7;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+}
+
+/* =========================================
+   阿七形象核心
+   ========================================= */
+
+.orb {
+  --emotion-color: #9c8cff;
+  --emotion-glow: rgba(156, 140, 255, 0.28);
+
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  flex-shrink: 0;
+  width: 142px;
+  height: 142px;
+  place-items: center;
+  overflow: hidden;
+  margin: 36px 0 24px;
+  border: 1px solid color-mix(in srgb, var(--emotion-color) 28%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 42%, #9a7be82a, transparent 65%),
+    #8470c40a;
+  box-shadow:
+    0 0 40px var(--emotion-glow),
+    inset 0 0 32px #a48af313;
+  transform-origin: center;
+  transition:
+    box-shadow 0.5s ease,
+    border-color 0.5s ease,
+    transform 0.5s ease,
+    background 0.5s ease;
+  animation: orb-idle-breathe 4s ease-in-out infinite;
+}
+
+.orb-active {
+  box-shadow:
+    0 0 48px var(--emotion-glow),
+    inset 0 0 35px #a48af32b;
+}
+
+/* 核心圆球 */
+
+.orb-core {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 92px;
+  height: 92px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--emotion-color) 45%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 25%, #ffffff35, transparent 35%),
+    linear-gradient(145deg, #8e79c9, #494064);
+  color: #fff;
+  font-size: 43px;
+  box-shadow:
+    0 8px 35px var(--emotion-glow),
+    inset 0 0 20px #ffffff0b;
+  transition:
+    background 0.5s ease,
+    box-shadow 0.5s ease,
+    border-color 0.5s ease;
+}
+
+/* 光晕层 */
+
+.orb-aura {
+  position: absolute;
+  inset: 12%;
+  z-index: 0;
+  border-radius: 50%;
+  background: var(--emotion-color);
+  opacity: 0.22;
+  filter: blur(20px);
+  transform: scale(0.88);
+  pointer-events: none;
+  transition:
+    background 0.5s ease,
+    opacity 0.5s ease;
+  animation: aura-breathe 3.4s ease-in-out infinite;
+}
+
+/* ---------- 阿七的脸 ---------- */
+
+.orb-face {
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 76px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.orb-eyes {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+}
+
+.orb-eye {
+  display: block;
+  width: 7px;
+  height: 10px;
+  border-radius: 50%;
+  background: #51456f;
+  transform-origin: center;
+  transition:
+    height 0.22s ease,
+    width 0.22s ease,
+    border-radius 0.22s ease,
+    transform 0.22s ease;
+  animation: orb-natural-blink 5s ease-in-out infinite;
+}
+
+.orb-eye-left {
+  animation-delay: 0.15s;
+}
+
+.orb-eye-right {
+  animation-delay: 0.15s;
+}
+
+.orb-mouth {
+  width: 15px;
+  height: 7px;
+  border: 2px solid #51456f;
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
+  transition:
+    width 0.22s ease,
+    height 0.22s ease,
+    border-radius 0.22s ease,
+    transform 0.22s ease;
+}
+
+/* ---------- 情绪：平静 ---------- */
+
+.orb-emotion-calm {
+  --emotion-color: #9c8cff;
+  --emotion-glow: rgba(156, 140, 255, 0.28);
+}
+
+.orb-emotion-calm .orb-aura {
+  opacity: 0.22;
+}
+
+/* ---------- 情绪：开心 ---------- */
+
+.orb-emotion-happy {
+  --emotion-color: #ffbf70;
+  --emotion-glow: rgba(255, 191, 112, 0.42);
+}
+
+.orb-emotion-happy .orb-aura {
+  opacity: 0.48;
+  transform: scale(1.08);
+}
+
+.orb-emotion-happy .orb-eye {
+  height: 5px;
+  border-radius: 50% 50% 0 0;
+  transform: translateY(2px);
+  animation: none;
+}
+
+.orb-emotion-happy .orb-mouth {
+  width: 23px;
+  height: 12px;
+  border-radius: 0 0 18px 18px;
+}
+
+/* ---------- 情绪：温柔关怀 ---------- */
+
+.orb-emotion-caring {
+  --emotion-color: #ff9eb5;
+  --emotion-glow: rgba(255, 158, 181, 0.34);
+}
+
+.orb-emotion-caring .orb-aura {
+  opacity: 0.36;
+  transform: scale(1);
+}
+
+.orb-emotion-caring .orb-eye {
+  height: 7px;
+  transform: scaleY(0.75);
+}
+
+.orb-emotion-caring .orb-mouth {
+  width: 17px;
+  height: 5px;
+  opacity: 0.8;
+}
+
+/* ---------- 情绪：好奇 ---------- */
+
+.orb-emotion-curious {
+  --emotion-color: #72dce8;
+  --emotion-glow: rgba(114, 220, 232, 0.38);
+}
+
+.orb-emotion-curious .orb-aura {
+  opacity: 0.42;
+  transform: scale(0.95);
+}
+
+.orb-emotion-curious .orb-eye {
+  width: 8px;
+  height: 13px;
+  transform: scale(1.08);
+}
+
+.orb-emotion-curious .orb-mouth {
+  width: 9px;
+  height: 9px;
+  border: 2px solid #51456f;
+  border-radius: 50%;
+}
+
+/* =========================================
+   阿七的交互状态
+   需要 App.tsx 添加 orb-mode-状态 类名
+   ========================================= */
+
+/* 待机：缓慢呼吸 */
+
+.orb-mode-idle {
+  animation: orb-idle-breathe 4s ease-in-out infinite;
+}
+
+.orb-mode-idle .orb-aura {
+  animation-duration: 4s;
+  opacity: 0.2;
+}
+
+/* 聆听：光晕轻柔扩张 */
+
+.orb-mode-listening {
+  animation: orb-listening 2.2s ease-in-out infinite;
+  box-shadow:
+    0 0 48px var(--emotion-glow),
+    inset 0 0 35px #a48af32b;
+}
+
+.orb-mode-listening .orb-aura {
+  animation: aura-listening 2s ease-in-out infinite;
+}
+
+/* 思考：光晕缓慢流动，球体微微浮动 */
+
+.orb-mode-thinking {
+  animation: orb-thinking 2.8s ease-in-out infinite;
+}
+
+.orb-mode-thinking .orb-aura {
+  animation: aura-thinking 1.8s ease-in-out infinite;
+}
+
+.orb-mode-thinking .orb-core {
+  box-shadow:
+    0 8px 42px var(--emotion-glow),
+    inset 0 0 24px #ffffff13;
+}
+
+/* 说话：更加明显的脉冲 */
+
+.orb-mode-speaking {
+  animation: orb-speaking 0.85s ease-in-out infinite;
+  box-shadow:
+    0 0 60px var(--emotion-glow),
+    inset 0 0 38px #a48af33b;
+}
+
+.orb-mode-speaking .orb-aura {
+  animation: aura-speaking 0.75s ease-in-out infinite;
+}
+
+.orb-mode-speaking .orb-mouth {
+  animation: mouth-speaking 0.32s ease-in-out infinite alternate;
+}
+
+/* 说话时保留开心、好奇等情绪的眼睛形状 */
+
+.orb-mode-speaking.orb-emotion-happy .orb-eye {
+  animation: none;
+}
+
+/* =========================================
+   动画定义
+   ========================================= */
+
+/* 待机呼吸 */
+
+@keyframes orb-idle-breathe {
+
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    transform: translateY(-3px) scale(1.018);
+  }
+}
+
+/* 自然眨眼：极短暂闭眼 */
+
+@keyframes orb-natural-blink {
+
+  0%,
+  43%,
+  47%,
+  100% {
+    transform: scaleY(1);
+  }
+
+  45% {
+    transform: scaleY(0.12);
+  }
+}
+
+/* 光晕呼吸 */
+
+@keyframes aura-breathe {
+
+  0%,
+  100% {
+    transform: scale(0.88);
+    opacity: 0.2;
+  }
+
+  50% {
+    transform: scale(1.06);
+    opacity: 0.34;
+  }
+}
+
+/* 聆听 */
+
+@keyframes orb-listening {
+
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.025);
+  }
+}
+
+@keyframes aura-listening {
+
+  0%,
+  100% {
+    transform: scale(0.88);
+    opacity: 0.2;
+  }
+
+  50% {
+    transform: scale(1.12);
+    opacity: 0.48;
+  }
+}
+
+/* 思考 */
+
+@keyframes orb-thinking {
+
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+
+  50% {
+    transform: translateY(-2px) rotate(1deg);
+  }
+}
+
+@keyframes aura-thinking {
+
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.18;
+  }
+
+  50% {
+    transform: scale(1.12);
+    opacity: 0.48;
+  }
+}
+
+/* 说话 */
+
+@keyframes orb-speaking {
+
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.035);
+  }
+}
+
+@keyframes aura-speaking {
+
+  0%,
+  100% {
+    transform: scale(0.86);
+    opacity: 0.24;
+  }
+
+  50% {
+    transform: scale(1.16);
+    opacity: 0.58;
+  }
+}
+
+@keyframes mouth-speaking {
+  from {
+    transform: scaleY(0.75);
+  }
+
+  to {
+    transform: scaleY(1.35);
+  }
+}
+
+/* =========================================
+   连接状态与伙伴信息
+   ========================================= */
+
+.companion-panel h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 3px;
+}
+
+.companion-subtitle {
+  margin: 10px 0 20px;
+  color: #8e899b;
+  font-size: 13px;
+}
+
+.connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border: 1px solid #ffffff12;
+  border-radius: 30px;
+  background: #ffffff06;
+  color: #aaa4b9;
+  font-size: 12px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #797385;
+}
+
+.status-connected .status-dot {
+  background: #77d6ac;
+  box-shadow: 0 0 10px #77d6ac88;
+}
+
+.status-connecting .status-dot {
+  background: #f1c779;
+  animation: blink 1s infinite;
+}
+
+.status-error .status-dot {
+  background: #ed828b;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 情绪、状态文字 */
+
+.emotion-status {
+  margin: 8px 0 0;
+  color: #a49abf;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------- 对话记录 ---------- */
+
+.transcript-box {
+  width: 100%;
+  min-height: 105px;
+  margin: 26px 0 20px;
+  padding: 16px;
+  border: 1px solid #ffffff0b;
+  border-radius: 14px;
+  background: #111116;
+  text-align: left;
+}
+
+.transcript-label {
+  color: #8f87a8;
+  font-size: 11px;
+}
+
+.transcript-box p {
+  margin: 12px 0 0;
+  color: #d0cadc;
+  font-size: 13px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* ---------- 按钮 ---------- */
+
+.primary-button,
+.secondary-button {
+  display: flex;
+  width: 100%;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border-radius: 12px;
+  font-weight: 600;
+  transition:
+    transform 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.primary-button {
+  border: 1px solid #ad98ee;
+  background: linear-gradient(120deg, #9982dd, #7965b9);
+  color: #fff;
+  box-shadow: 0 5px 20px #8d76d31c;
+}
+
+.primary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 25px #8d76d333;
+}
+
+.secondary-button {
+  border: 1px solid #ffffff20;
+  background: #ffffff08;
+  color: #d9d2e8;
+}
+
+.secondary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: #ffffff0d;
+}
+
+.privacy-note {
+  margin: 23px 0 0;
+  color: #777184;
+  font-size: 10px;
+  line-height: 1.8;
+}
+
+.privacy-note span {
+  color: #b5a2f1;
+}
+
+/* =========================================
+   记忆面板
+   ========================================= */
+
+.memory-panel {
+  min-width: 0;
+  padding: 30px;
+}
+
+.memory-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.memory-heading h2 {
+  margin: 12px 0 8px;
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.section-description {
+  margin: 0;
+  color: #8c879b;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.refresh-button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  border: 1px solid #ffffff16;
+  border-radius: 10px;
+  background: #ffffff06;
+  color: #c9c1dc;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.refresh-button span {
+  font-size: 17px;
+}
+
+.refresh-spinning {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 记忆统计 ---------- */
+
+.memory-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 28px 0;
+}
+
+.stat-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 17px;
+  border: 1px solid #ffffff0c;
+  border-radius: 14px;
+  background: linear-gradient(140deg, #ffffff07, #ffffff02);
+}
+
+.stat-card>span {
+  color: #a19aaf;
+  font-size: 12px;
+}
+
+.stat-card strong {
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.stat-card small {
+  color: #777184;
+  font-size: 10px;
+}
+
+/* ---------- 搜索与筛选 ---------- */
+
+.memory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.search-box {
+  display: flex;
+  min-width: 180px;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  padding: 0 13px;
+  border: 1px solid #ffffff14;
+  border-radius: 11px;
+  background: #111116;
+  color: #9d93bb;
+}
+
+.search-box>span {
+  font-size: 23px;
+}
+
+.search-box input {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #eeeaf7;
+  font-size: 12px;
+}
+
+.search-box input::placeholder {
+  color: #696475;
+}
+
+.search-box input:focus-visible {
+  outline: none;
+}
+
+.clear-search {
+  border: 0;
+  background: transparent;
+  color: #a69bbd;
+  font-size: 19px;
+}
+
+.filter-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #ffffff0b;
+  border-radius: 10px;
+  background: #111116;
+}
+
+.filter-tabs button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #898397;
+  font-size: 12px;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+.filter-tabs button.selected {
+  background: #8872c52b;
+  color: #d2c3ff;
+}
+
+/* ---------- 提示栏 ---------- */
+
+.notice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border: 1px solid #9b88d52b;
+  border-radius: 10px;
+  background: #9b88d50d;
+  color: #d0c2ff;
+  font-size: 12px;
+}
+
+.notice-bar button {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+}
+
+/* ---------- 错误面板 ---------- */
+
+.error-panel {
+  padding: 24px;
+  border: 1px solid #e7808033;
+  border-radius: 14px;
+  background: #e780800a;
+  color: #e7a3a3;
+}
+
+.error-panel p {
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.error-panel button,
+.text-button {
+  padding: 7px 12px;
+  border: 1px solid #ffffff20;
+  border-radius: 8px;
+  background: #ffffff08;
+  color: #d8caff;
+  font-size: 12px;
+}
+
+/* ---------- 记忆列表 ---------- */
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #ffffff0e;
+  border-radius: 14px;
+  background: #ffffff03;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.memory-card:hover {
+  border-color: #b19be62b;
+  background: #a18ad709;
+}
+
+.memory-card-top,
+.memory-card-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.memory-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.category-tag,
+.importance-tag,
+.historical-tag {
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 10px;
+}
+
+.category-tag {
+  border-color: #9c88dc2b;
+  background: #9c88dc12;
+  color: #c6b7f5;
+}
+
+.importance-high {
+  background: #df929212;
+  color: #e7a7a7;
+}
+
+.importance-medium {
+  background: #e5c17d12;
+  color: #d9bd87;
+}
+
+.importance-low {
+  background: #83b7a412;
+  color: #9bc9b6;
+}
+
+.historical-tag {
+  background: #ffffff09;
+  color: #a29bad;
+}
+
+.memory-key {
+  color: #777184;
+  font-family: monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.memory-content {
+  margin: 17px 0;
+  color: #e2ddeb;
+  font-size: 14px;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.memory-date {
+  color: #777184;
+  font-size: 10px;
+}
+
+.memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-actions button {
+  padding: 7px 11px;
+  border: 1px solid #ffffff15;
+  border-radius: 8px;
+  background: #ffffff05;
+  color: #bcb2d1;
+  font-size: 11px;
+  transition:
+    border-color 0.2s ease,
+    color 0.2s ease,
+    background 0.2s ease;
+}
+
+.memory-actions button:hover {
+  border-color: #b09ae64a;
+  color: #e1d5ff;
+}
+
+.memory-actions .delete-button {
+  color: #d9959c;
+}
+
+.memory-actions .delete-button:hover {
+  border-color: #d9959c55;
+  background: #d9959c0c;
+}
+
+/* ---------- 空列表 ---------- */
+
+.empty-state {
+  display: flex;
+  min-height: 220px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.empty-icon {
+  margin-bottom: 14px;
+  color: #a996e3;
+  font-size: 35px;
+}
+
+.empty-state strong {
+  color: #d9d2e8;
+  font-size: 14px;
+}
+
+.empty-state p {
+  max-width: 320px;
+  color: #817b90;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.list-footer {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #ffffff0c;
+  color: #777184;
+  font-size: 11px;
+  text-align: center;
+}
+
+/* ---------- 页脚 ---------- */
+
+.app-footer {
+  display: flex;
+  max-width: 1440px;
+  justify-content: space-between;
+  gap: 15px;
+  margin: 0 auto;
+  padding: 22px 0 28px;
+  border-top: 1px solid #ffffff0c;
+  color: #777184;
+  font-size: 11px;
+}
+
+.footer-heart {
+  color: #c08dbe;
+}
+
+/* =========================================
+   响应式布局
+   ========================================= */
+
+@media (max-width: 950px) {
+  .app-shell {
+    padding: 0 20px;
+  }
+
+  .dashboard {
+    grid-template-columns: 1fr;
+    max-width: 700px;
+    margin-top: 24px;
+  }
+
+  .companion-panel {
+    position: static;
+  }
+
+  .orb {
+    margin-top: 24px;
+  }
+
+  .companion-panel .transcript-box,
+  .companion-panel .primary-button,
+  .companion-panel .secondary-button {
+    max-width: 420px;
+  }
+
+  .memory-panel {
+    padding: 24px;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-shell {
+    padding: 0 12px;
+  }
+
+  .topbar {
+    height: 65px;
+  }
+
+  .brand {
+    gap: 8px;
+    font-size: 15px;
+  }
+
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+  }
+
+  .topbar-caption {
+    font-size: 11px;
+    text-align: right;
+  }
+
+  .dashboard {
+    gap: 16px;
+    margin-top: 16px;
+    margin-bottom: 28px;
+  }
+
+  .companion-panel,
+  .memory-panel {
+    border-radius: 18px;
+  }
+
+  .companion-panel {
+    padding: 28px 18px 22px;
+  }
+
+  .memory-panel {
+    padding: 19px 14px;
+  }
+
+  .memory-heading {
+    gap: 10px;
+  }
+
+  .memory-heading h2 {
+    font-size: 23px;
+  }
+
+  .memory-stats {
+    gap: 7px;
+    margin: 22px 0;
+  }
+
+  .stat-card {
+    gap: 6px;
+    padding: 12px 9px;
+  }
+
+  .stat-card strong {
+    font-size: 23px;
+  }
+
+  .stat-card>span {
+    font-size: 11px;
+  }
+
+  .stat-card small {
+    font-size: 9px;
+  }
+
+  .memory-toolbar {
+    align-items: stretch;
+  }
+
+  .search-box {
+    min-width: 100%;
+  }
+
+  .filter-tabs {
+    justify-content: space-around;
+  }
+
+  .filter-tabs button {
+    flex: 1;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .memory-card {
+    padding: 14px;
+  }
+
+  .memory-date {
+    width: 100%;
+  }
+
+  .memory-card-bottom {
+    align-items: flex-start;
+  }
+
+  .memory-actions {
+    width: 100%;
+  }
+
+  .app-footer {
+    flex-wrap: wrap;
+    font-size: 10px;
+  }
+}
+
+/* ---------- 减少动态效果：尊重系统设置 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

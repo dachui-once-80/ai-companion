@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1790732746845,
+      "tag": "0000_productive_mathemanic",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790735019894,
+      "tag": "0001_far_wildside",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791444862582,
+      "tag": "0002_complete_cerise",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791533025660,
+      "tag": "0003_orange_zaladane",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791624638683,
+      "tag": "0004_careful_winter_soldier",
+      "breakpoints": true
+    }
+  ]
+}
