@@ -43,6 +43,13 @@
       "when": 1791865444258,
       "tag": "0005_companion_affect",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791872158223,
+      "tag": "0006_silly_gargoyle",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,5 @@
 import type { Identity } from "./Identity";
+import { PERSONA } from "./Persona";
 import { companionProfileStore } from "./CompanionProfileStore";
 
 export class Companion {
@@ -10,7 +11,7 @@ export class Companion {
       previousNames: JSON.parse(
         profile.previousNames,
       ) as string[],
-      personality: profile.personality,
+      persona: PERSONA,
     };
   }
 

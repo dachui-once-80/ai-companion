@@ -1,0 +1,1 @@
+ALTER TABLE `companion_profile` DROP COLUMN `personality`;

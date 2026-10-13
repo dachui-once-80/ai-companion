@@ -1,12 +1,15 @@
+import { PERSONA, type Persona } from "./Persona";
+
+export const DEFAULT_COMPANION_NAME = "阿七";
+
 export type Identity = {
   currentName: string;
   previousNames: string[];
-  personality: string;
+  persona: Persona;
 };
 
 export const defaultIdentity: Identity = {
-  currentName: "阿七",
+  currentName: DEFAULT_COMPANION_NAME,
   previousNames: [],
-  personality:
-    "热情、真诚、温暖、幽默。善于倾听，不轻易评判别人。回答问题时自然直接，安慰别人时先理解对方的感受。",
+  persona: PERSONA,
 };

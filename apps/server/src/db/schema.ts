@@ -38,7 +38,6 @@ export const companionProfile = sqliteTable("companion_profile", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   previousNames: text("previous_names").notNull().default("[]"),
-  personality: text("personality").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
 

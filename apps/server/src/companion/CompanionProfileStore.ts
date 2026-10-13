@@ -1,14 +1,9 @@
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { companionProfile } from "../db/schema";
+import { DEFAULT_COMPANION_NAME } from "./Identity";
 
 const PROFILE_ID = "main";
-
-const DEFAULT_NAME = "阿七";
-
-const DEFAULT_PERSONALITY =
-  "热情、真诚、温暖、幽默。善于倾听，不轻易评判别人。" +
-  "回答问题时自然直接，安慰别人时先理解对方的感受。";
 
 export class CompanionProfileStore {
   getOrCreate() {
@@ -27,9 +22,8 @@ export class CompanionProfileStore {
     db.insert(companionProfile)
       .values({
         id: PROFILE_ID,
-        name: DEFAULT_NAME,
+        name: DEFAULT_COMPANION_NAME,
         previousNames: "[]",
-        personality: DEFAULT_PERSONALITY,
         updatedAt: now,
       })
       .run();
