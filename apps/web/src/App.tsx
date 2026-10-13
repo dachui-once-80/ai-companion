@@ -86,6 +86,7 @@ function App() {
   const clientRef = useRef<RealtimeClient | null>(null);
   const transcriptRef = useRef("");
   const visualStateRef = useRef<VisualState>("idle");
+  const holdListeningRef = useRef(false);
 
   const [state, setState] = useState<ConnectionState>("idle");
   const [transcript, setTranscript] = useState("");
@@ -329,16 +330,25 @@ function App() {
         }
 
         if (message.type === "connected") {
+          holdListeningRef.current = false;
           setState("connected");
           updateVisualState("listening");
         }
+        if (message.type === "playback_interrupted") {
+          // 用户插话，已经把喇叭里的声音停掉。
+          holdListeningRef.current = true;
+          updateVisualState("listening");
+        }
         if (message.type === "audio_playback_started") {
+          holdListeningRef.current = false;
           updateVisualState("speaking");
         }
 
         if (message.type === "input_transcript") {
-          // 用户开始说话，阿七正在接收语音输入。
-          updateVisualState("thinking");
+          // 插话之后继续听用户说完；平时则进入思考。
+          updateVisualState(
+            holdListeningRef.current ? "listening" : "thinking",
+          );
         }
 
         if (message.type === "turn_complete") {

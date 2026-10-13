@@ -36,7 +36,8 @@ export type RealtimeMessage =
       cause: string;
       mood: string;
     }
-  | { type: "audio_playback_started" };
+  | { type: "audio_playback_started" }
+  | { type: "playback_interrupted" };
 
 type MessageHandler = (message: RealtimeMessage) => void;
 
@@ -288,10 +289,22 @@ export class RealtimeClient {
   private speakingNotified = false;
   private turnCompletePending = false;
 
+  // 这一轮模型音频已被打断，转写结束前不再把后续片段排进播放队列。
+  private discardUnplayedAudio = false;
+
+  // 同一句插话的后续转写先别再打断，等她下一次真正开口后再恢复。
+  private transcriptBargeReadyAt = 0;
+
+  // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
+  private playbackTurnSettled = false;
+
+  // playAudio 在 resume 期间还没把节点放进队列，这段时间也算正在播放。
+  private playAudioInFlight = 0;
+
   // 连接代次：旧连接的异步操作不能影响新连接。
   private connectionGeneration = 0;
 
-  // 播放代次：断开后旧音频回调自动失效。
+  // 播放代次：断开或打断后，旧音频回调自动失效。
   private playbackGeneration = 0;
 
   private connecting = false;
@@ -1388,6 +1401,16 @@ scope 规则：
     }
 
     const inputTranscript = content.inputTranscription?.text;
+    const interimTranscript =
+      content.interimInputTranscription?.text;
+
+    if (
+      typeof interimTranscript === "string" &&
+      interimTranscript.length > 0
+    ) {
+      // 临时转写比最终转写更早，用来在她出声时立刻停播。
+      this.bargeInFromUser(generation);
+    }
 
     if (
       typeof inputTranscript === "string" &&
@@ -1400,6 +1423,14 @@ scope 规则：
         type: "input_transcript",
         text: inputTranscript,
       });
+
+      // 她还在出声时用户已经开口，立刻停播。
+      this.bargeInFromUser(generation);
+    }
+
+    if (content.interrupted) {
+      this.transcriptBargeReadyAt = Number.POSITIVE_INFINITY;
+      this.clearPlayback(generation, true);
     }
 
 
@@ -1425,8 +1456,18 @@ scope 规则：
     const parts = content.modelTurn?.parts;
 
     if (parts) {
+      const hasAudio = parts.some((part) => {
+        const data = part.inlineData?.data;
+        return typeof data === "string" && data.length > 0;
+      });
+
+      if (hasAudio && !this.discardUnplayedAudio) {
+        this.playbackTurnSettled = false;
+      }
+
       for (const part of parts) {
         if (!this.isCurrentConnection(generation)) return;
+        if (this.discardUnplayedAudio) continue;
 
         const data = part.inlineData?.data;
 
@@ -1442,6 +1483,9 @@ scope 规则：
     ) {
       return;
     }
+
+    this.discardUnplayedAudio = false;
+    this.playbackTurnSettled = true;
 
     if (this.userAppraisalTimer !== null) {
       window.clearTimeout(this.userAppraisalTimer);
@@ -2235,6 +2279,63 @@ scope 规则：
    * Audio playback
    */
 
+  private isPlaybackActive(): boolean {
+    return (
+      this.playAudioInFlight > 0 ||
+      this.activeAudioSources.size > 0
+    );
+  }
+
+  private bargeInFromUser(generation: number): void {
+    if (performance.now() < this.transcriptBargeReadyAt) return;
+    if (!this.isPlaybackActive()) return;
+
+    this.transcriptBargeReadyAt = Number.POSITIVE_INFINITY;
+
+    // 这一轮如果服务端已经说完，只把尾巴停掉，下一轮回答照常播。
+    this.clearPlayback(
+      generation,
+      !this.playbackTurnSettled,
+    );
+  }
+
+  // 停掉喇叭里正在响的声音，并作废已经排进队列、还没播的片段。
+  private clearPlayback(
+    generation: number,
+    discardRest: boolean,
+  ): void {
+    if (!this.isCurrentConnection(generation)) return;
+
+    this.playbackGeneration++;
+    this.nextOutputTime = 0;
+    this.speakingNotified = false;
+    this.turnCompletePending = false;
+
+    if (discardRest) {
+      this.discardUnplayedAudio = true;
+      this.playbackTurnSettled = false;
+    }
+
+    for (const source of this.activeAudioSources) {
+      source.onended = null;
+
+      try {
+        source.stop();
+      } catch {
+        // 音频可能已经结束，或还没真正开始。
+      }
+
+      try {
+        source.disconnect();
+      } catch {
+        // 节点可能已经断开。
+      }
+    }
+
+    this.activeAudioSources.clear();
+    this.emit({ type: "playback_interrupted" });
+  }
+
   private async playAudio(
     base64: string,
     generation: number,
@@ -2243,18 +2344,25 @@ scope 规则：
 
     if (
       !context ||
-      !this.isCurrentConnection(generation)
+      !this.isCurrentConnection(generation) ||
+      this.discardUnplayedAudio
     ) {
       return;
     }
 
     const playbackGeneration = this.playbackGeneration;
+    this.playAudioInFlight++;
 
-    await context.resume();
+    try {
+      await context.resume();
+    } finally {
+      this.playAudioInFlight--;
+    }
 
     if (
       !this.isCurrentConnection(generation) ||
       playbackGeneration !== this.playbackGeneration ||
+      this.discardUnplayedAudio ||
       context !== this.outputContext
     ) {
       return;
@@ -2289,6 +2397,13 @@ scope 规则：
 
     if (!this.speakingNotified) {
       this.speakingNotified = true;
+
+      if (
+        this.transcriptBargeReadyAt === Number.POSITIVE_INFINITY
+      ) {
+        this.transcriptBargeReadyAt = performance.now() + 800;
+      }
+
       this.emit({ type: "audio_playback_started" });
     }
 
@@ -2359,6 +2474,9 @@ scope 规则：
 
     this.turnCompletePending = false;
     this.speakingNotified = false;
+    this.discardUnplayedAudio = false;
+    this.playbackTurnSettled = false;
+    this.transcriptBargeReadyAt = 0;
     this.currentUserText = "";
     this.lastAppraisedUserText = "";
     this.currentEmotion = "calm";
