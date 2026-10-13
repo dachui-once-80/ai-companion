@@ -9,6 +9,8 @@ import {
 import { db } from "../db";
 import { memories } from "../db/schema";
 
+import { contentKey } from "./openMemory";
+
 import {
   getMemoryPolicy,
   getMemoryCategory,
@@ -22,6 +24,8 @@ import type {
   MemoryStatus,
   MemorySource,
 } from "./MemoryTypes";
+
+import type { OpenMemoryCategory } from "./openMemory";
 
 export type RememberMemoryInput = {
   category: MemoryCategory;
@@ -568,6 +572,160 @@ export class MemoryStore {
         updatedAt: now,
       },
     };
+  }
+
+  /**
+   * 片段、判断、留下的事不走档案 key。
+   * append 按内容去重；replace 用同一 key 替换当前判断。
+   */
+  saveCompanionMemory(input: {
+    category: OpenMemoryCategory;
+    key: string;
+    content: string;
+    importance: MemoryImportance;
+    mode: "append" | "replace";
+  }): {
+    action: "created" | "updated" | "unchanged";
+    memory: Memory;
+  } {
+    const category = input.category;
+    const key = input.key.trim();
+    const content = input.content.trim();
+
+    if (!key.startsWith(`${category}:`)) {
+      throw new Error(`Invalid companion memory key: ${key}`);
+    }
+
+    if (!content) {
+      throw new Error("Memory content cannot be empty");
+    }
+
+    if (content.length > MAX_MEMORY_CONTENT_LENGTH) {
+      throw new Error(
+        `Memory content is too long (max ${MAX_MEMORY_CONTENT_LENGTH} characters)`,
+      );
+    }
+
+    const normalized = contentKey(content);
+    const current = this.findByCategory(category).filter(
+      (memory) => memory.status === "current",
+    );
+
+    if (input.mode === "append") {
+      const duplicate = current.find(
+        (memory) => contentKey(memory.content) === normalized,
+      );
+
+      if (duplicate) {
+        return { action: "unchanged", memory: duplicate };
+      }
+
+      return {
+        action: "created",
+        memory: this.addMemory({
+          category,
+          key,
+          content,
+          importance: input.importance,
+          status: "current",
+          source: "companion",
+        }),
+      };
+    }
+
+    const sameKey = current.filter((memory) => memory.key === key);
+    const sameText = sameKey.find(
+      (memory) => contentKey(memory.content) === normalized,
+    );
+
+    if (sameText) {
+      return { action: "unchanged", memory: sameText };
+    }
+
+    if (sameKey.length === 0) {
+      return {
+        action: "created",
+        memory: this.addMemory({
+          category,
+          key,
+          content,
+          importance: input.importance,
+          status: "current",
+          source: "companion",
+        }),
+      };
+    }
+
+    const now = new Date().toISOString();
+    const next: Memory = {
+      id: crypto.randomUUID(),
+      category,
+      key,
+      content,
+      importance: input.importance,
+      status: "current",
+      source: "companion",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    db.transaction((tx) => {
+      for (const memory of sameKey) {
+        tx.update(memories)
+          .set({ status: "historical", updatedAt: now })
+          .where(eq(memories.id, memory.id))
+          .run();
+      }
+
+      tx.insert(memories)
+        .values({
+          id: next.id,
+          category: next.category,
+          key: next.key,
+          content: next.content,
+          importance: next.importance,
+          status: next.status,
+          source: next.source,
+          createdAt: next.createdAt,
+          updatedAt: next.updatedAt,
+        })
+        .run();
+    });
+
+    return { action: "updated", memory: next };
+  }
+
+  retireCompanionMemory(
+    category: OpenMemoryCategory,
+    key: string,
+  ): number {
+    const normalizedKey = key.trim();
+
+    if (!normalizedKey.startsWith(`${category}:`)) {
+      throw new Error(`Invalid companion memory key: ${normalizedKey}`);
+    }
+
+    const current = this.findCurrentByKey(normalizedKey).filter(
+      (memory) => memory.category === category,
+    );
+
+    if (current.length === 0) return 0;
+
+    const updatedAt = new Date().toISOString();
+
+    for (const memory of current) {
+      db.update(memories)
+        .set({ status: "historical", updatedAt })
+        .where(
+          and(
+            eq(memories.id, memory.id),
+            eq(memories.status, "current"),
+          ),
+        )
+        .run();
+    }
+
+    return current.length;
   }
 
   updateMemory(

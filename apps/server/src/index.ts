@@ -7,6 +7,11 @@ import { appraiseLocally } from "./affect/appraise";
 import { Companion } from "./companion/Companion";
 import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
+import {
+  ConsolidationInputError,
+  consolidateConversation,
+  consolidationResponseSchema,
+} from "./memory/consolidate";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import { db } from "./db";
@@ -1110,6 +1115,47 @@ app.get("/api/memory/context", (_req, res) => {
 
     res.status(500).json({
       error: "Failed to generate memory context",
+    });
+  }
+});
+
+app.post("/api/memory/consolidate", async (req, res) => {
+  try {
+    const result = await consolidateConversation({
+      body: req.body,
+      memory: memoryManager,
+      generate: async (prompt) => {
+        const response = await gemini.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: prompt,
+          config: {
+            temperature: 0.2,
+            responseMimeType: "application/json",
+            responseJsonSchema: consolidationResponseSchema,
+          },
+        });
+
+        const text = response.text;
+
+        if (!text?.trim()) {
+          throw new Error("Empty consolidation response");
+        }
+
+        return text;
+      },
+    });
+
+    console.log("[Memory] consolidated:", result.saved);
+    res.json(result);
+  } catch (error) {
+    if (error instanceof ConsolidationInputError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+
+    console.error("[Memory] consolidation failed:", error);
+    res.status(502).json({
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 });

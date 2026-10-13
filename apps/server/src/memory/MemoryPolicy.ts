@@ -81,6 +81,18 @@ const policies: Record<string, MemoryPolicy> = {
   },
 };
 
+export function listMemoryKeys(): Array<{
+  key: string;
+  category: MemoryCategory;
+  cardinality: MemoryCardinality;
+}> {
+  return Object.entries(policies).map(([key, policy]) => ({
+    key,
+    category: policy.category,
+    cardinality: policy.cardinality,
+  }));
+}
+
 export function isValidMemoryKey(key: string): boolean {
   const normalizedKey = key.trim();
 

@@ -16,7 +16,10 @@ type MemoryCategory =
   | "preference"
   | "fact"
   | "event"
-  | "relationship";
+  | "relationship"
+  | "episode"
+  | "impression"
+  | "note";
 
 type MemoryImportance = "low" | "medium" | "high";
 
@@ -40,6 +43,9 @@ const categoryLabels: Record<MemoryCategory, string> = {
   fact: "事实",
   event: "事件",
   relationship: "关系",
+  episode: "片段",
+  impression: "判断",
+  note: "留下的",
 };
 
 const importanceLabels: Record<MemoryImportance, string> = {
@@ -47,6 +53,18 @@ const importanceLabels: Record<MemoryImportance, string> = {
   medium: "中",
   high: "高",
 };
+
+function displayKey(key: string): string {
+  if (
+    key.startsWith("episode:") ||
+    key.startsWith("impression:") ||
+    key.startsWith("note:")
+  ) {
+    return key.slice(key.indexOf(":") + 1);
+  }
+
+  return key;
+}
 
 function formatDate(value: string) {
   if (!value) return "时间未知";
@@ -138,6 +156,21 @@ function App() {
 
     return () => {
       window.clearTimeout(timer);
+    };
+  }, [loadMemories]);
+
+  useEffect(() => {
+    const onMemoryUpdated = () => {
+      void loadMemories();
+    };
+
+    window.addEventListener("companion-memory-updated", onMemoryUpdated);
+
+    return () => {
+      window.removeEventListener(
+        "companion-memory-updated",
+        onMemoryUpdated,
+      );
     };
   }, [loadMemories]);
 
@@ -267,7 +300,6 @@ function App() {
 
         if (message.type === "memory_updated") {
           console.log("[Memory] refreshing memory list");
-          void loadMemories();
         }
 
         if (message.type === "emotion_changed") {
@@ -508,6 +540,7 @@ function App() {
       !keyword ||
       memory.content.toLowerCase().includes(keyword) ||
       memory.key.toLowerCase().includes(keyword) ||
+      displayKey(memory.key).toLowerCase().includes(keyword) ||
       (categoryLabels[memory.category] ?? memory.category)
         .toLowerCase()
         .includes(keyword);
@@ -623,7 +656,7 @@ function App() {
               <div className="eyebrow">LONG-TERM MEMORY</div>
               <h2>记忆管理</h2>
               <p className="section-description">
-                阿七记住了什么，由你决定。
+                档案、聊过的片段，和她留下的判断。
               </p>
             </div>
 
@@ -768,6 +801,10 @@ function App() {
                       {categoryLabels[memory.category] ?? memory.category}
                     </span>
 
+                    {memory.source === "companion" && (
+                      <span className="category-tag">她留下的</span>
+                    )}
+
                     <span
                       className={`importance-tag importance-${memory.importance}`}
                     >
@@ -781,7 +818,7 @@ function App() {
                     )}
                   </div>
 
-                  <span className="memory-key">{memory.key}</span>
+                  <span className="memory-key">{displayKey(memory.key)}</span>
                 </div>
 
                 <p className="memory-content">{memory.content}</p>

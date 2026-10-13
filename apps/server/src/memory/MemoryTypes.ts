@@ -1,9 +1,17 @@
-export type MemoryCategory = | "identity" | "preference" | "fact" | "event" | "relationship";
+export type MemoryCategory =
+  | "identity"
+  | "preference"
+  | "fact"
+  | "event"
+  | "relationship"
+  | "episode"
+  | "impression"
+  | "note";
 
-export type MemoryImportance = | "low" | "medium" | "high";
+export type MemoryImportance = "low" | "medium" | "high";
 
-export type MemoryStatus = | "current" | "historical";
+export type MemoryStatus = "current" | "historical";
 
-export type MemorySource = | "user";
+export type MemorySource = "user" | "companion";
 
 export type Memory = { id: string; category: MemoryCategory; key: string; content: string; importance: MemoryImportance; status: MemoryStatus; source: MemorySource; createdAt: string; updatedAt: string; };

@@ -87,6 +87,52 @@ export type CompanionAffect = {
 const RESTING_MOOD =
   "心情接近平时。没有一件特别的事压在心上。";
 
+type DialogueTurn = {
+  role: "user" | "companion";
+  text: string;
+};
+
+function localDateString(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dialogueWorthKeeping(batch: DialogueTurn[]): boolean {
+  const userText = batch
+    .filter((turn) => turn.role === "user")
+    .map((turn) => turn.text)
+    .join("");
+
+  return userText.replace(/\s+/g, "").length >= 4;
+}
+
+function savedCount(data: unknown): number {
+  if (typeof data !== "object" || data === null || !("saved" in data)) {
+    return 0;
+  }
+
+  const saved = data.saved;
+
+  if (typeof saved !== "object" || saved === null) return 0;
+
+  let count = 0;
+
+  for (const key of [
+    "episodes",
+    "impressions",
+    "notes",
+    "profile",
+    "retired",
+  ]) {
+    const value = (saved as Record<string, unknown>)[key];
+    if (typeof value === "number") count += value;
+  }
+
+  return count;
+}
+
 export function parseCompanionAffect(data: unknown): CompanionAffect | null {
   if (typeof data !== "object" || data === null) return null;
 
@@ -208,11 +254,20 @@ function bulletList(items: readonly string[]): string {
 
 
 export class RealtimeClient {
+  private static consolidationTail: Promise<void> = Promise.resolve();
+
   private session: Session | null = null;
   private socketConnected = false;
   private messageHandler: MessageHandler | null = null;
 
   private currentUserText = "";
+  private currentCompanionText = "";
+  private pendingDialogue: DialogueTurn[] = [];
+  private consolidateTimer: number | null = null;
+  private companionCaptureTimer: number | null = null;
+  private companionCaptureStartedAt = 0;
+  private awaitingCompanionText = false;
+  private consolidationDelay = 30_000;
   private currentEmotion: CompanionEmotion = "calm";
   private currentCause = "";
   private lastInjectedMood = "";
@@ -249,6 +304,10 @@ export class RealtimeClient {
 
   private emit(message: RealtimeMessage): void {
     try {
+      if (message.type === "memory_updated") {
+        window.dispatchEvent(new Event("companion-memory-updated"));
+      }
+
       this.messageHandler?.(message);
     } catch (error) {
       console.error("[RealtimeClient] Message handler failed:", error);
@@ -332,6 +391,15 @@ export class RealtimeClient {
 
       if (!this.isCurrentConnection(generation)) return;
 
+      await Promise.race([
+        RealtimeClient.consolidationTail,
+        new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 25_000);
+        }),
+      ]);
+
+      if (!this.isCurrentConnection(generation)) return;
+
       let memoryContext = "当前没有可用的用户长期记忆。";
       let moodContext = RESTING_MOOD;
 
@@ -393,7 +461,7 @@ export class RealtimeClient {
                 {
                   name: "remember_memory",
                   description:
-                    "记录用户明确表达且对未来聊天具有长期价值的信息。不要记录推测或一次性闲聊。多值偏好应保留其他仍然成立的值。",
+                    "记录用户明确说出的稳定档案，例如姓名、城市、喜好、重要的人。不要记录某一天发生的事、你对用户近况的判断，或档案字段里没有的内容。那些会在对话之后整理。多值偏好应保留其他仍然成立的值。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -445,7 +513,7 @@ export class RealtimeClient {
                 {
                   name: "recall_memory",
                   description:
-                    "当用户询问个人信息、过去的经历、偏好或明确依赖长期记忆的问题时调用。",
+                    "当用户询问个人信息、以前的经历、昨天或前几天发生的事、近况，或任何依赖过去聊天的问题时调用。查最近的事时用事情里的词，不要编造档案字段。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -671,6 +739,146 @@ export class RealtimeClient {
    * Affect
    * 心情来自服务端状态。表情只是把它显示出来。
    */
+
+  private pushDialogue(
+    role: DialogueTurn["role"],
+    text: string,
+  ): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    this.pendingDialogue.push({ role, text: trimmed });
+  }
+
+  private armCompanionCapture(generation: number): void {
+    const startedAt = this.companionCaptureStartedAt || Date.now();
+    this.companionCaptureStartedAt = startedAt;
+
+    if (this.companionCaptureTimer !== null) {
+      window.clearTimeout(this.companionCaptureTimer);
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const wait = elapsed >= 4_000 ? 0 : 1_200;
+
+    this.companionCaptureTimer = window.setTimeout(() => {
+      this.companionCaptureTimer = null;
+      this.companionCaptureStartedAt = 0;
+      this.awaitingCompanionText = false;
+
+      if (!this.isCurrentConnection(generation)) return;
+
+      this.pushDialogue("companion", this.currentCompanionText);
+      this.currentCompanionText = "";
+      this.scheduleConsolidation(5_000);
+    }, wait);
+  }
+
+  private scheduleConsolidation(delayMs: number): void {
+    if (this.consolidateTimer !== null) {
+      window.clearTimeout(this.consolidateTimer);
+    }
+
+    this.consolidateTimer = window.setTimeout(() => {
+      this.consolidateTimer = null;
+      this.flushConsolidation();
+    }, delayMs);
+  }
+
+  private flushConsolidation(): void {
+    const batch = this.pendingDialogue.splice(0);
+
+    if (!dialogueWorthKeeping(batch)) {
+      if (batch.length > 0) {
+        this.pendingDialogue = batch.concat(this.pendingDialogue);
+      }
+      return;
+    }
+
+    this.enqueueConsolidation(batch);
+  }
+
+  private flushDialogueNow(): void {
+    if (this.companionCaptureTimer !== null) {
+      window.clearTimeout(this.companionCaptureTimer);
+      this.companionCaptureTimer = null;
+    }
+
+    if (this.consolidateTimer !== null) {
+      window.clearTimeout(this.consolidateTimer);
+      this.consolidateTimer = null;
+    }
+
+    this.awaitingCompanionText = false;
+    this.companionCaptureStartedAt = 0;
+    this.pushDialogue("user", this.currentUserText);
+    this.pushDialogue("companion", this.currentCompanionText);
+    this.currentUserText = "";
+    this.currentCompanionText = "";
+
+    const batch = this.pendingDialogue.splice(0);
+
+    if (dialogueWorthKeeping(batch)) {
+      this.enqueueConsolidation(batch);
+    }
+  }
+
+  private enqueueConsolidation(batch: DialogueTurn[]): void {
+    let failed = false;
+
+    RealtimeClient.consolidationTail = RealtimeClient.consolidationTail
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          const saved = await this.postConsolidation(batch);
+          this.consolidationDelay = 30_000;
+
+          if (saved > 0) {
+            this.emit({ type: "memory_updated" });
+          }
+        } catch (error) {
+          failed = true;
+          console.warn("[Memory] consolidation failed:", error);
+          this.pendingDialogue = batch.concat(this.pendingDialogue);
+          this.scheduleConsolidation(this.consolidationDelay);
+          this.consolidationDelay = Math.min(
+            this.consolidationDelay * 2,
+            120_000,
+          );
+        }
+
+        if (!failed && this.pendingDialogue.length > 0) {
+          this.scheduleConsolidation(1_000);
+        }
+      });
+  }
+
+  private async postConsolidation(
+    batch: DialogueTurn[],
+  ): Promise<number> {
+    const response = await fetch("/api/memory/consolidate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        occurredOn: localDateString(),
+        turns: batch,
+      }),
+    });
+
+    if (!response.ok) {
+      if (response.status === 400) {
+        console.warn(
+          "[Memory] consolidation rejected:",
+          response.status,
+        );
+        return 0;
+      }
+
+      throw new Error(`consolidation failed: ${response.status}`);
+    }
+
+    return savedCount(await response.json());
+  }
 
   private async loadMemoryContext(): Promise<string | null> {
     try {
@@ -992,16 +1200,19 @@ ${moodContext}
 ## 当前用户长期记忆
 ${memoryContext}
 
-这些信息描述的是用户，不是你自己。
+这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。
 不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己。
-只在与对话相关时自然使用，不要主动逐条复述。
-如果用户询问过去的信息，调用 recall_memory 查询历史记录。
+只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
+问昨天、前几天时，先对照记忆开头的日期。没有记录就说不记得，不要编。
+如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
 如果没有相关记忆，不要猜测或编造。
+
+某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
 
 ## 长期记忆总原则
 记忆的目的是帮助你在未来的对话中更了解用户，而不是保存每一句聊天内容。
 
-值得长期保留的信息包括：
+值得放进档案的信息包括：
 - 用户明确提供的身份信息，例如姓名、生日、教育背景。
 - 相对稳定的事实，例如所在城市、职业。
 - 长期偏好，例如喜欢的食物、饮料、音乐、电影。
@@ -1010,19 +1221,23 @@ ${memoryContext}
 - 长期目标，例如正在学习的技能、长期计划和个人目标。
 - 有持续价值的习惯，例如规律运动、固定学习习惯。
 
-不要保存：
-- 一次性闲聊、临时心情、短期状态或无关紧要的细节。
-- 你自己推测、猜测或没有可靠依据的信息。
+不要用 remember_memory 保存：
+- 一次性闲聊，或和未来聊天无关的细节。
+- 某一天发生的事、你对用户近况的感觉。这些会在对话之后整理，不要塞进档案字段。
+- 你自己推测出来、用户没有明说的稳定事实。
 - 用户没有表达过的个人事实。
 - 密码、验证码、访问令牌等敏感认证信息。
 - 不值得长期保留的琐碎内容。
 
-当用户明确要求你记住某件事时，认真判断内容和分类；只要属于系统支持的记忆范围，就尝试调用 remember_memory。
-用户只是随口提到一件事时，只有当信息对未来聊天有持续价值时才考虑保存，不要把每轮聊天都变成记忆操作。
+用户明确让你记住一件事时：
+- 能对应下面档案字段的，调用 remember_memory。
+- 对不上这些字段的，不要编一个新字段，也不要说记不住。把这件事放在对话里，结束后会整理进去。
+
+用户只是随口提到一件稳定事实时，只有当它对未来聊天有持续价值时才考虑写入档案，不要把每轮聊天都变成记忆操作。
 如果信息含糊、相互矛盾，或无法确定该保存什么，应先询问一个简短的澄清问题。
 
 ## 记忆键与分类规则
-必须使用 MemoryPolicy 支持的 key，并使用对应的 category。不要自行编造新 key，也不要因为某个 key 更符合直觉就改变它的分类。
+档案必须使用下面列出的字段，并使用对应的 category。不要自行编造新字段。某一天的事、最近的状态、你对用户的感觉，都不要写成这些字段。
 
 身份类：
 - user_name：用户姓名，category 为 identity，通常只有一个 current 值。
@@ -1069,8 +1284,8 @@ favorite_food、favorite_drink、hobby、interest、favorite_music、favorite_mo
 不要仅仅因为用户提到一个新兴趣、新目标或新的人，就撤销之前的其他记忆。
 
 ## 记忆召回
-当用户询问个人信息、偏好、经历、关系、目标，或提出明显依赖过去聊天的问题时，调用 recall_memory。
-如果能确定 key，应尽量提供准确的 key；不确定时不要编造 key。
+当用户询问个人信息、偏好、经历、关系、目标、昨天或前几天发生的事、近况，或提出明显依赖过去聊天的问题时，调用 recall_memory。
+如果能确定档案字段，应尽量提供准确的字段；不确定时不要编造。查片段和判断时，用事情里的词作为 query，不要填一个不存在的字段。
 
 scope 规则：
 - current：当前仍然成立的信息。
@@ -1194,6 +1409,12 @@ scope 规则：
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
+      this.currentCompanionText += outputTranscript;
+
+      if (this.awaitingCompanionText) {
+        this.armCompanionCapture(generation);
+      }
+
       this.emit({
         type: "output_transcript",
         text: outputTranscript,
@@ -1233,6 +1454,11 @@ scope 规则：
     if (userText.length >= 2) {
       void this.appraiseTurn(userText, generation);
     }
+
+    this.pushDialogue("user", userText);
+    this.awaitingCompanionText = true;
+    this.companionCaptureStartedAt = Date.now();
+    this.armCompanionCapture(generation);
 
     this.lastAppraisedUserText = "";
 
@@ -2121,6 +2347,8 @@ scope 规则：
     if (this.cleanupPromise) {
       return this.cleanupPromise;
     }
+
+    this.flushDialogueNow();
 
     // 让所有旧异步回调立即失效。
     this.connectionGeneration++;
