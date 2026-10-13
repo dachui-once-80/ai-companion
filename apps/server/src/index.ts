@@ -1072,6 +1072,15 @@ app.get("/api/companion/thoughts", (req, res) => {
   }
 });
 
+app.get("/api/companion/thoughts/context", (_req, res) => {
+  try {
+    res.json({ context: thoughtStore.renderForConversation() });
+  } catch (error) {
+    console.error("[Thought] context failed:", error);
+    res.status(500).json({ error: "Failed to read thoughts" });
+  }
+});
+
 app.get("/api/companion/thoughts/:id", (req, res) => {
   try {
     const thought = thoughtStore.get(req.params.id);
@@ -1122,20 +1131,21 @@ app.post("/api/companion/thoughts", (req, res) => {
   const kind: ThoughtKind = record.kind;
 
   try {
-    res.status(201).json(
-      thoughtStore.save({
-        kind,
-        content: record.content,
-        about: record.about,
-      }),
-    );
+    const saved = thoughtStore.save({
+      kind,
+      content: record.content,
+      about: record.about,
+    });
+
+    res.status(saved.action === "created" ? 201 : 200).json(saved.thought);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const invalid =
       message.includes("cannot be empty") ||
       message.includes("too long") ||
-      message.includes("needs the sentence") ||
-      message.includes("Only a view");
+      message.includes("needs the matter") ||
+      message.includes("Only a view") ||
+      message.includes("cannot change who she is");
 
     if (!invalid) {
       console.error("[Thought] save failed:", error);
@@ -1251,6 +1261,7 @@ app.post("/api/memory/consolidate", async (req, res) => {
     const result = await consolidateConversation({
       body: req.body,
       memory: memoryManager,
+      thoughts: thoughtStore,
       generate: async (prompt) => {
         const response = await gemini.models.generateContent({
           model: "gemini-3.8-flash",
@@ -1294,6 +1305,7 @@ app.post("/api/memory/consolidate", async (req, res) => {
           notes: 0,
           profile: 0,
           retired: 0,
+          views: 0,
         },
         retryAfterMs,
       });

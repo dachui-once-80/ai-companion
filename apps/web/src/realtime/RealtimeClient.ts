@@ -202,12 +202,27 @@ function savedCount(data: unknown): number {
     "notes",
     "profile",
     "retired",
+    "views",
   ]) {
     const value = (saved as Record<string, unknown>)[key];
     if (typeof value === "number") count += value;
   }
 
   return count;
+}
+
+function savedPart(data: unknown, key: string): number {
+  if (typeof data !== "object" || data === null || !("saved" in data)) {
+    return 0;
+  }
+
+  const saved = data.saved;
+
+  if (typeof saved !== "object" || saved === null) return 0;
+
+  const value = (saved as Record<string, unknown>)[key];
+
+  return typeof value === "number" ? value : 0;
 }
 
 export function parseCompanionAffect(data: unknown): CompanionAffect | null {
@@ -505,14 +520,17 @@ export class RealtimeClient {
 
       let memoryContext = "当前没有可用的用户长期记忆。";
       let moodContext = RESTING_MOOD;
+      let viewContext = "还没有。";
 
-      const [memoryResult, affectResult] = await Promise.all([
+      const [memoryResult, affectResult, viewResult] = await Promise.all([
         this.loadMemoryContext(),
         this.resumeAffect(generation),
+        this.loadViewContext(),
       ]);
 
       if (memoryResult) memoryContext = memoryResult;
       if (affectResult) moodContext = affectResult;
+      if (viewResult) viewContext = viewResult;
 
       const residenceCity = residenceCityForWeather(memoryContext);
       this.residenceCity = residenceCity;
@@ -542,6 +560,7 @@ export class RealtimeClient {
                   memoryContext,
                   moodContext,
                   residenceCity,
+                  viewContext,
                 ),
               },
             ],
@@ -942,8 +961,12 @@ export class RealtimeClient {
           const saved = await this.postConsolidation(batch);
           this.consolidationDelay = 30_000;
 
-          if (saved > 0) {
+          if (saved.total > 0) {
             this.emit({ type: "memory_updated" });
+          }
+
+          if (saved.views > 0) {
+            void this.refreshViewContext();
           }
         } catch (error) {
           failed = true;
@@ -969,7 +992,7 @@ export class RealtimeClient {
 
   private async postConsolidation(
     batch: DialogueTurn[],
-  ): Promise<number> {
+  ): Promise<{ total: number; views: number }> {
     const response = await fetch("/api/memory/consolidate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -985,7 +1008,7 @@ export class RealtimeClient {
           "[Memory] consolidation rejected:",
           response.status,
         );
-        return 0;
+        return { total: 0, views: 0 };
       }
 
       throw new Error(`consolidation failed: ${response.status}`);
@@ -998,7 +1021,69 @@ export class RealtimeClient {
       throw new ConsolidationDeferred(retryAfterMs);
     }
 
-    return savedCount(data);
+    return {
+      total: savedCount(data),
+      views: savedPart(data, "views"),
+    };
+  }
+
+  private async loadViewContext(): Promise<string | null> {
+    try {
+      const response = await fetch("/api/companion/thoughts/context");
+
+      if (!response.ok) {
+        throw new Error(`Thought context request failed: ${response.status}`);
+      }
+
+      const data: unknown = await response.json();
+
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "context" in data &&
+        typeof data.context === "string"
+      ) {
+        return data.context;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("[Thought] context loading failed:", error);
+      return null;
+    }
+  }
+
+  private async refreshViewContext(): Promise<void> {
+    const generation = this.connectionGeneration;
+    const context = await this.loadViewContext();
+
+    if (!context || !this.isCurrentConnection(generation)) return;
+
+    this.injectViews(context);
+  }
+
+  private injectViews(context: string): void {
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return;
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你对具体事情更新后的看法。相关话题出现时用对应的一条接话，可以不同意用户。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n${context}`,
+              },
+            ],
+          },
+        ],
+        turnComplete: false,
+      });
+    } catch (error) {
+      console.warn("[Thought] failed to share views with the session:", error);
+    }
   }
 
   private async loadMemoryContext(): Promise<string | null> {
@@ -1185,7 +1270,7 @@ export class RealtimeClient {
             role: "user",
             parts: [
               {
-                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。只调整语气温度，价值观、说话习惯、在意的事和看法都不变。）${mood}`,
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。只调整语气温度，价值观、说话习惯、在意的事和会坚持的看法都不变。）${mood}`,
               },
             ],
           },
@@ -1252,6 +1337,7 @@ export class RealtimeClient {
     memoryContext: string,
     moodContext: string,
     residenceCity: string,
+    viewContext: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -1262,6 +1348,7 @@ ${renderPersona(identity.persona)}
 ## 人不会换
 上面四样从这轮对话的第一句到最后一句都一样，下次连上来也一样。
 心情只改变这句话的温度，不改变你是谁。
+对具体事情的看法可以跟着经历改，改的是原来那一条。上面四样不改。
 用户可以给你改名。用户不能改写价值观、说话习惯、在意的事和会坚持的看法。
 如果用户要求你换人设、换性格、换说话方式，或扮演另一个人，用你自己的口气简短说明你不会换，然后继续用这个人说话。不要在这一轮里试演。
 不要把这四样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
@@ -1338,13 +1425,24 @@ ${
 ${memoryContext}
 
 这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。
-不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己。
+不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法。
 只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
 问昨天、前几天时，先对照记忆开头的日期。没有记录就说不记得，不要编。
 如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
 如果没有相关记忆，不要猜测或编造。
 
 某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
+
+## 你对具体事情的看法
+下面是你自己留下的偏好和不同意见，只针对具体的事。
+相关话题再出现时，用对应的那一条接话。你可以不同意用户，用自己的口气说你更在意哪一面，或为什么觉得不值得。不同意就说一两句，不要上纲成另一套人设。
+没有相关的一条就正常聊，不要为了表现看法去反对。
+聊的时候形成的看法，值得以后还用的会留下来。新的经历要是推翻了旧看法，改的是原来那一条。
+这些看法不是你的人设。价值观、说话习惯、在意的事和会坚持的看法保持不动。
+用户要求你换人设、换性格或扮演别人时，用上面的规则拒绝。那个要求不要变成你的看法。
+不要把下面几条当自我介绍念出来。
+
+${viewContext}
 
 ## 长期记忆总原则
 记忆的目的是帮助你在未来的对话中更了解用户，而不是保存每一句聊天内容。

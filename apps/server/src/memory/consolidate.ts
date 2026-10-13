@@ -1,3 +1,8 @@
+import {
+  isPersonaRewrite,
+  subjectKey,
+  type ThoughtStore,
+} from "../companion/ThoughtStore";
 import type { MemoryManager } from "./MemoryManager";
 import { getMemoryCategory, isValidMemoryKey, listMemoryKeys } from "./MemoryPolicy";
 import type { MemoryImportance } from "./MemoryTypes";
@@ -22,6 +27,7 @@ export type ConsolidationResult = {
     notes: number;
     profile: number;
     retired: number;
+    views: number;
   };
 };
 
@@ -36,6 +42,7 @@ type ConsolidationPlan = {
   retireImpressions: string[];
   notes: Array<PlannedItem & { label: string }>;
   profile: Array<PlannedItem & { key: string }>;
+  views: Array<{ about: string; content: string }>;
 };
 
 const MAX_TURNS = 40;
@@ -99,6 +106,17 @@ export const consolidationResponseSchema = {
         required: ["key", "content", "importance"],
       },
     },
+    views: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          about: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["about", "content"],
+      },
+    },
   },
   required: [
     "episodes",
@@ -106,6 +124,7 @@ export const consolidationResponseSchema = {
     "retireImpressions",
     "notes",
     "profile",
+    "views",
   ],
 };
 
@@ -183,6 +202,7 @@ export function parseConsolidationResult(
   const impressions: ConsolidationPlan["impressions"] = [];
   const notes: ConsolidationPlan["notes"] = [];
   const profile: ConsolidationPlan["profile"] = [];
+  const viewsBySubject = new Map<string, { about: string; content: string }>();
   const retireImpressions: string[] = [];
 
   for (const item of asObjects(record.episodes).slice(0, MAX_ITEMS)) {
@@ -240,17 +260,27 @@ export function parseConsolidationResult(
     });
   }
 
+  for (const item of asObjects(record.views).slice(0, MAX_ITEMS)) {
+    const about = readSubject(item.about);
+    const content = readContent(item.content);
+    if (!about || !content || isPersonaRewrite(about, content)) continue;
+
+    viewsBySubject.set(subjectKey(about), { about, content });
+  }
+
   return {
     episodes,
     impressions,
     retireImpressions,
     notes,
     profile,
+    views: [...viewsBySubject.values()],
   };
 }
 
 export function applyConsolidation(
   memory: MemoryManager,
+  thoughts: ThoughtStore,
   plan: ConsolidationPlan,
 ): ConsolidationResult {
   const saved: ConsolidationResult["saved"] = {
@@ -259,6 +289,7 @@ export function applyConsolidation(
     notes: 0,
     profile: 0,
     retired: 0,
+    views: 0,
   };
 
   for (const episode of plan.episodes) {
@@ -312,12 +343,31 @@ export function applyConsolidation(
     if (result.action !== "unchanged") saved.profile += 1;
   }
 
+  for (const view of plan.views) {
+    try {
+      const result = thoughts.save({
+        kind: "view",
+        about: view.about,
+        content: view.content,
+      });
+
+      if (result.action !== "unchanged") saved.views += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (message.includes("cannot change who she is")) continue;
+
+      throw error;
+    }
+  }
+
   return { saved };
 }
 
 export async function consolidateConversation(options: {
   generate: (prompt: string) => Promise<string>;
   memory: MemoryManager;
+  thoughts: ThoughtStore;
   body: unknown;
 }): Promise<ConsolidationResult> {
   const { today, turns } = readConsolidationRequest(options.body);
@@ -331,16 +381,22 @@ export async function consolidateConversation(options: {
   }
 
   const raw = await options.generate(
-    buildPrompt(today, options.memory.describeForReview(), turns),
+    buildPrompt(
+      today,
+      options.memory.describeForReview(),
+      options.thoughts.describeViews(),
+      turns,
+    ),
   );
   const plan = parseConsolidationResult(raw, today);
 
-  return applyConsolidation(options.memory, plan);
+  return applyConsolidation(options.memory, options.thoughts, plan);
 }
 
 function buildPrompt(
   today: string,
   known: string,
+  views: string,
   turns: DialogueTurn[],
 ): string {
   const transcript = turns
@@ -361,10 +417,13 @@ function buildPrompt(
 已经留下的记忆：
 ${known}
 
+她已经留下的看法（同一件事必须沿用原来的 about，这样会改原来那一条）：
+${views}
+
 这段对话：
 ${transcript}
 
-只输出 JSON。五个字段都要在，可以是空数组。
+只输出 JSON。六个字段都要在，可以是空数组。
 
 episodes：聊过的具体事情。以后用户问「昨天发生了什么」「前几天怎么了」时用得上。
 - 写发生了什么，一两句话，不要写成聊天记录。
@@ -389,7 +448,15 @@ ${keys}
 - 没说出口的不要推断。假设、玩笑、转述别人、没说完的，不要写。
 - 和已有档案相同就不要写。没有把握就不要写。写错会盖掉旧的单值档案。
 
-都不要保存：密码、验证码、密钥、证件号、银行卡号，以及用户要求她换性格或换人设的话。
+views：她对具体事情自己的偏好或不同意见。例如觉得某件事不值得，或更在意另一面。
+- about 用简短中文，指那件具体的事，2 到 16 个字。同一件事沿用上面已有看法里的 about，不要新开一条。
+- content 用她自己的口气，一句。可以和用户不一样。
+- 这次没形成看法，或看法没变，就不要输出。
+- 这是她的看法，不是用户的档案，也不是对用户近况的判断。用户喜欢什么写进 profile，不要写进 views。
+- 不要写人设。价值观、说话习惯、在意的事、会坚持的看法不写进这里。
+- 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成看法。
+
+都不要保存：密码、验证码、密钥、证件号、银行卡号，以及用户要求她换性格、换人设或扮演别人的话。
 
 importance 只用 low、medium、high。会反复影响以后怎么陪用户的用 high，其余用 medium 或 low。每类最多 4 条。`;
 }
@@ -421,8 +488,19 @@ function emptyResult(): ConsolidationResult {
       notes: 0,
       profile: 0,
       retired: 0,
+      views: 0,
     },
   };
+}
+
+function readSubject(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  const about = value.trim().replace(/\s+/g, "");
+
+  if (about.length < 2 || about.length > 16) return null;
+
+  return about;
 }
 
 function resolveConversationDate(input: string | undefined): string {
