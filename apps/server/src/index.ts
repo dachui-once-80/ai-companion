@@ -6,6 +6,7 @@ import { Companion } from "./companion/Companion";
 import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
 import { randomUUID } from "node:crypto";
+import http from "node:http";
 import { db } from "./db";
 import { tasks } from "./db/schema";
 import { eq, asc, and, lte } from "drizzle-orm";
@@ -13,6 +14,8 @@ import {
   ProxyAgent,
   setGlobalDispatcher,
 } from "undici";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { WebSocket, WebSocketServer } from "ws";
 import type {
   MemoryCategory,
   MemoryImportance,
@@ -23,21 +26,37 @@ import type {
  * Network
  * =========================================================
  *
- * Node.js 本身不会自动使用 Clash 的系统代理。
+ * Node.js 不会自动使用系统代理。Gemini 在国内通常需要代理。
  *
- * 当前 Clash for Windows:
+ * 默认走本地 HTTP 代理 127.0.0.1:1082。
+ * 端口不同时设置：
+ *   HTTP_PROXY=http://127.0.0.1:1082
+ * 也可用：
+ *   HTTP_PROXY=off   # 关闭代理（直连）
  *
- * HTTP Proxy:
- *   127.0.0.1:7890
- *
- * 所以让 Node.js / @google/genai 的请求
- * 统一通过 Clash。
+ * 若控制台出现 ECONNREFUSED，说明代理未启动或端口不对。
  */
-const proxyAgent = new ProxyAgent(
-  "http://127.0.0.1:7890",
-);
+const DEFAULT_PROXY = "http://127.0.0.1:1082";
+const rawProxy =
+  process.env.HTTP_PROXY ||
+  process.env.HTTPS_PROXY ||
+  process.env.PROXY_URL;
+const proxyUrl =
+  rawProxy === "off" || rawProxy === "false"
+    ? null
+    : rawProxy || DEFAULT_PROXY;
 
-setGlobalDispatcher(proxyAgent);
+if (proxyUrl) {
+  setGlobalDispatcher(new ProxyAgent(proxyUrl));
+}
+
+const liveProxyAgent = proxyUrl
+  ? new HttpsProxyAgent(proxyUrl)
+  : undefined;
+
+/** 浏览器经此前缀转发 Live WebSocket，由服务端走代理连 Gemini */
+const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
+const GEMINI_WS_ORIGIN = "wss://generativelanguage.googleapis.com";
 
 /**
  * =========================================================
@@ -72,6 +91,9 @@ if (!geminiApiKey) {
 
 const gemini = new GoogleGenAI({
   apiKey: geminiApiKey,
+  httpOptions: {
+    apiVersion: "v1alpha",
+  },
 });
 
 
@@ -155,6 +177,53 @@ app.get(
  *
  * Browser
  */
+/**
+ * 检查当前代理出口是否被 Gemini 接受。
+ * 换 Clash 节点后可访问：GET /api/gemini/health
+ */
+app.get("/api/gemini/health", async (_req, res) => {
+  let egressIp: string | null = null;
+
+  try {
+    const ipResponse = await fetch("https://api.ipify.org");
+    if (ipResponse.ok) {
+      egressIp = (await ipResponse.text()).trim();
+    }
+  } catch {
+    egressIp = null;
+  }
+
+  try {
+    await gemini.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: "ping",
+    });
+
+    res.json({
+      ok: true,
+      egressIp,
+      proxy: proxyUrl,
+      message: "当前出口可用于 Gemini",
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+    const locationBlocked = message.includes(
+      "User location is not supported",
+    );
+
+    res.status(locationBlocked ? 503 : 500).json({
+      ok: false,
+      egressIp,
+      proxy: proxyUrl,
+      locationBlocked,
+      message: locationBlocked
+        ? "当前 Clash 出口 IP 被 Gemini 拒绝，请换一个美国/日本/新加坡节点后再试"
+        : message.slice(0, 300),
+    });
+  }
+});
+
 app.post(
   "/api/gemini/token",
   async (_req, res) => {
@@ -793,18 +862,116 @@ setInterval(() => {
   void checkTaskReminders();
 }, 15_000);
 
-app.listen(
-  PORT,
-  () => {
-    console.log(
-      `AI Companion server running at http://localhost:${PORT}`,
-    );
+const server = http.createServer(app);
+const liveProxyWss = new WebSocketServer({ noServer: true });
 
-    console.log(
-      "[Network] Clash proxy: http://127.0.0.1:7890",
-    );
-  },
-);
+server.on("upgrade", (request, socket, head) => {
+  const requestUrl = request.url ?? "";
+
+  if (!requestUrl.startsWith(`${LIVE_PROXY_PREFIX}/`)) {
+    socket.destroy();
+    return;
+  }
+
+  const upstreamPath = requestUrl.slice(LIVE_PROXY_PREFIX.length);
+  const upstreamUrl = `${GEMINI_WS_ORIGIN}${upstreamPath}`;
+
+  liveProxyWss.handleUpgrade(request, socket, head, (client) => {
+    const pending: Array<{
+      data: WebSocket.RawData;
+      isBinary: boolean;
+    }> = [];
+
+    const upstream = new WebSocket(upstreamUrl, {
+      agent: liveProxyAgent,
+    });
+
+    const flushPending = () => {
+      for (const message of pending) {
+        if (upstream.readyState === WebSocket.OPEN) {
+          upstream.send(message.data, { binary: message.isBinary });
+        }
+      }
+      pending.length = 0;
+    };
+
+    client.on("message", (data, isBinary) => {
+      if (upstream.readyState === WebSocket.OPEN) {
+        upstream.send(data, { binary: isBinary });
+        return;
+      }
+
+      if (
+        upstream.readyState === WebSocket.CONNECTING &&
+        pending.length < 32
+      ) {
+        pending.push({ data, isBinary });
+      }
+    });
+
+    upstream.on("open", () => {
+      console.log("[Gemini Live Proxy] upstream connected");
+      flushPending();
+    });
+
+    upstream.on("message", (data, isBinary) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data, { binary: isBinary });
+      }
+    });
+
+    const closeBoth = (code?: number, reason?: string) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.close(code, reason);
+      }
+
+      if (
+        upstream.readyState === WebSocket.OPEN ||
+        upstream.readyState === WebSocket.CONNECTING
+      ) {
+        upstream.close(code, reason);
+      }
+    };
+
+    client.on("close", (code, reason) => {
+      upstream.close(code, reason);
+    });
+
+    upstream.on("close", (code, reason) => {
+      console.warn("[Gemini Live Proxy] upstream closed:", {
+        code,
+        reason: reason.toString(),
+      });
+      client.close(code, reason);
+    });
+
+    client.on("error", (error) => {
+      console.error("[Gemini Live Proxy] client error:", error);
+      closeBoth(1011, "client error");
+    });
+
+    upstream.on("error", (error) => {
+      console.error("[Gemini Live Proxy] upstream error:", error);
+      closeBoth(1011, "upstream error");
+    });
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(
+    `AI Companion server running at http://localhost:${PORT}`,
+  );
+
+  console.log(
+    proxyUrl
+      ? `[Network] proxy: ${proxyUrl}`
+      : "[Network] proxy: disabled (set HTTP_PROXY to enable)",
+  );
+
+  console.log(
+    `[Gemini Live Proxy] ${LIVE_PROXY_PREFIX} -> ${GEMINI_WS_ORIGIN}`,
+  );
+});
 
 app.get(
   "/api/companion/identity",

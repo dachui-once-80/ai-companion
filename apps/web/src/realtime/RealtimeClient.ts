@@ -6,6 +6,9 @@ import {
   type Session,
 } from "@google/genai";
 
+/** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
+const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
+
 export type CompanionEmotion =
   | "calm"
   | "happy"
@@ -319,8 +322,13 @@ export class RealtimeClient {
         throw new Error("Gemini Token 数据格式错误");
       }
 
+      // Live WebSocket 经本地服务转发，避免浏览器直连被地区限制断开。
       const ai = new GoogleGenAI({
         apiKey: tokenData.token,
+        httpOptions: {
+          apiVersion: "v1alpha",
+          baseUrl: `${window.location.origin}${LIVE_PROXY_PREFIX}`,
+        },
       });
 
       const outputContext = new AudioContext({

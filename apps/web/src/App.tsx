@@ -297,6 +297,18 @@ function App() {
           updateVisualState("idle");
           setEmotion("calm");
 
+          if (
+            message.reason?.includes(
+              "User location is not supported",
+            )
+          ) {
+            setNotice(
+              "Gemini 拒绝了当前代理出口 IP。请在 Clash 换一个美国/日本/新加坡节点，打开 /api/gemini/health 确认 ok:true 后再呼叫。",
+            );
+          } else if (message.reason) {
+            setNotice(`连接已断开：${message.reason}`);
+          }
+
           return;
         }
       });
