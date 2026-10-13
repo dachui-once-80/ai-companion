@@ -150,8 +150,11 @@ function isShortLookup(text: string): boolean {
 }
 
 class ConsolidationDeferred extends Error {
-  constructor(readonly retryAfterMs: number) {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
     super("consolidation deferred");
+    this.retryAfterMs = retryAfterMs;
   }
 }
 

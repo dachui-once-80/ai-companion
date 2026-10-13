@@ -5,6 +5,11 @@ import { GoogleGenAI } from "@google/genai";
 import { affectStore } from "./affect/AffectStore";
 import { appraiseLocally } from "./affect/appraise";
 import { Companion } from "./companion/Companion";
+import {
+  isThoughtKind,
+  thoughtStore,
+  type ThoughtKind,
+} from "./companion/ThoughtStore";
 import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
 import {
@@ -1043,6 +1048,104 @@ app.post(
     }
   },
 );
+
+app.get("/api/companion/thoughts", (req, res) => {
+  const rawKind = req.query.kind;
+  let kind: ThoughtKind | undefined;
+
+  if (rawKind !== undefined) {
+    if (typeof rawKind !== "string" || !isThoughtKind(rawKind)) {
+      res.status(400).json({
+        error: "kind must be unresolved, view, or question",
+      });
+      return;
+    }
+
+    kind = rawKind;
+  }
+
+  try {
+    res.json(thoughtStore.list(kind));
+  } catch (error) {
+    console.error("[Thought] list failed:", error);
+    res.status(500).json({ error: "Failed to read thoughts" });
+  }
+});
+
+app.get("/api/companion/thoughts/:id", (req, res) => {
+  try {
+    const thought = thoughtStore.get(req.params.id);
+
+    if (!thought) {
+      res.status(404).json({ error: "Thought not found" });
+      return;
+    }
+
+    res.json(thought);
+  } catch (error) {
+    console.error("[Thought] read failed:", error);
+    res.status(500).json({ error: "Failed to read thought" });
+  }
+});
+
+app.post("/api/companion/thoughts", (req, res) => {
+  const body = req.body;
+
+  if (typeof body !== "object" || body === null) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const record = body as {
+    kind?: unknown;
+    content?: unknown;
+    about?: unknown;
+  };
+
+  if (typeof record.kind !== "string" || !isThoughtKind(record.kind)) {
+    res.status(400).json({
+      error: "kind must be unresolved, view, or question",
+    });
+    return;
+  }
+
+  if (typeof record.content !== "string") {
+    res.status(400).json({ error: "content is required" });
+    return;
+  }
+
+  if (record.about !== undefined && typeof record.about !== "string") {
+    res.status(400).json({ error: "about must be a string" });
+    return;
+  }
+
+  const kind: ThoughtKind = record.kind;
+
+  try {
+    res.status(201).json(
+      thoughtStore.save({
+        kind,
+        content: record.content,
+        about: record.about,
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const invalid =
+      message.includes("cannot be empty") ||
+      message.includes("too long") ||
+      message.includes("needs the sentence") ||
+      message.includes("Only a view");
+
+    if (!invalid) {
+      console.error("[Thought] save failed:", error);
+    }
+
+    res.status(invalid ? 400 : 500).json({
+      error: invalid ? message : "Failed to save thought",
+    });
+  }
+});
 
 app.post("/api/affect/resume", (_req, res) => {
   try {

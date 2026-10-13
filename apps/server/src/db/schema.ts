@@ -41,6 +41,15 @@ export const companionProfile = sqliteTable("companion_profile", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const companionThoughts = sqliteTable("companion_thoughts", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  content: text("content").notNull(),
+  about: text("about").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey(),
   title: text("title").notNull(),
