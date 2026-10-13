@@ -1,4 +1,5 @@
 import {
+  real,
   sqliteTable,
   text,
 } from "drizzle-orm/sqlite-core";
@@ -19,6 +20,18 @@ export const memories = sqliteTable("memories", {
     .default("user"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const companionAffect = sqliteTable("companion_affect", {
+  id: text("id").primaryKey(),
+  valence: real("valence").notNull(),
+  arousal: real("arousal").notNull(),
+  warmth: real("warmth").notNull(),
+  curiosity: real("curiosity").notNull(),
+  cause: text("cause").notNull().default(""),
+  expression: text("expression").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  lastSeenAt: text("last_seen_at").notNull(),
 });
 
 export const companionProfile = sqliteTable("companion_profile", {

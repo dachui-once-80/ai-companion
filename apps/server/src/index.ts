@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
+import { affectStore } from "./affect/AffectStore";
+import { appraiseLocally } from "./affect/appraise";
 import { Companion } from "./companion/Companion";
 import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
@@ -863,6 +865,36 @@ setInterval(() => {
 }, 15_000);
 
 const server = http.createServer(app);
+function closeQuietly(
+  socket: WebSocket,
+  code?: number,
+  reason?: string,
+): void {
+  if (
+    socket.readyState !== WebSocket.OPEN &&
+    socket.readyState !== WebSocket.CONNECTING
+  ) {
+    return;
+  }
+
+  const safeCode =
+    code !== undefined &&
+    code >= 1000 &&
+    code <= 4999 &&
+    code !== 1004 &&
+    code !== 1005 &&
+    code !== 1006 &&
+    code !== 1015
+      ? code
+      : 1000;
+
+  try {
+    socket.close(safeCode, (reason ?? "").slice(0, 120));
+  } catch (error) {
+    console.error("[Gemini Live Proxy] close failed:", error);
+  }
+}
+
 const liveProxyWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (request, socket, head) => {
@@ -921,20 +953,12 @@ server.on("upgrade", (request, socket, head) => {
     });
 
     const closeBoth = (code?: number, reason?: string) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.close(code, reason);
-      }
-
-      if (
-        upstream.readyState === WebSocket.OPEN ||
-        upstream.readyState === WebSocket.CONNECTING
-      ) {
-        upstream.close(code, reason);
-      }
+      closeQuietly(client, code, reason);
+      closeQuietly(upstream, code, reason);
     };
 
     client.on("close", (code, reason) => {
-      upstream.close(code, reason);
+      closeQuietly(upstream, code, reason.toString());
     });
 
     upstream.on("close", (code, reason) => {
@@ -942,7 +966,7 @@ server.on("upgrade", (request, socket, head) => {
         code,
         reason: reason.toString(),
       });
-      client.close(code, reason);
+      closeQuietly(client, code, reason.toString());
     });
 
     client.on("error", (error) => {
@@ -1014,6 +1038,55 @@ app.post(
     }
   },
 );
+
+app.post("/api/affect/resume", (_req, res) => {
+  try {
+    res.json(affectStore.resume());
+  } catch (error) {
+    console.error("[Affect] resume failed:", error);
+    res.status(500).json({ error: "Failed to resume affect" });
+  }
+});
+
+app.post("/api/affect/settle", (_req, res) => {
+  try {
+    res.json(affectStore.settle());
+  } catch (error) {
+    console.error("[Affect] settle failed:", error);
+    res.status(500).json({ error: "Failed to settle affect" });
+  }
+});
+
+app.post("/api/affect/appraise", async (req, res) => {
+  const userText =
+    typeof req.body === "object" &&
+    req.body !== null &&
+    "userText" in req.body
+      ? req.body.userText
+      : undefined;
+
+  if (typeof userText !== "string" || userText.trim().length < 2) {
+    try {
+      res.json(affectStore.settle());
+    } catch (error) {
+      console.error("[Affect] settle failed:", error);
+      res.status(500).json({ error: "Failed to settle affect" });
+    }
+    return;
+  }
+
+  try {
+    const appraisal = appraiseLocally(
+      userText,
+      affectStore.peekCause(),
+    );
+
+    res.json(affectStore.follow(appraisal));
+  } catch (error) {
+    console.error("[Affect] appraisal failed:", error);
+    res.status(500).json({ error: "Failed to update affect" });
+  }
+});
 
 app.get(
   "/api/memory",

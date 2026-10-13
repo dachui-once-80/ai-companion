@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  parseCompanionAffect,
   RealtimeClient,
   type ConnectionState,
   type CompanionEmotion,
@@ -71,6 +72,8 @@ function App() {
   const [state, setState] = useState<ConnectionState>("idle");
   const [transcript, setTranscript] = useState("");
   const [emotion, setEmotion] = useState<CompanionEmotion>("calm");
+  const [moodCause, setMoodCause] = useState("");
+  const affectEpoch = useRef(0);
   const [visualState, setVisualState] = useState<VisualState>("idle");
 
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -137,6 +140,49 @@ function App() {
       window.clearTimeout(timer);
     };
   }, [loadMemories]);
+
+  useEffect(() => {
+    if (state === "connected" || state === "connecting") return;
+
+    let active = true;
+
+    const refreshAffect = async () => {
+      const seen = affectEpoch.current;
+
+      try {
+        const response = await fetch("/api/affect/settle", {
+          method: "POST",
+        });
+
+        if (!response.ok) {
+          throw new Error(`读取心情失败：HTTP ${response.status}`);
+        }
+
+        const affect = parseCompanionAffect(await response.json());
+
+        if (!active || !affect || affectEpoch.current !== seen) return;
+
+        setEmotion(affect.expression);
+        setMoodCause(affect.cause);
+      } catch (error) {
+        console.warn("[Affect] settle failed:", error);
+      }
+    };
+
+    const timer = window.setTimeout(() => {
+      void refreshAffect();
+    }, 0);
+
+    const interval = window.setInterval(() => {
+      void refreshAffect();
+    }, 20_000);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+    };
+  }, [state]);
 
   useEffect(() => {
     let active = true;
@@ -207,7 +253,6 @@ function App() {
       setTranscript("");
       transcriptRef.current = "";
 
-      setEmotion("calm");
       updateVisualState("idle");
 
 
@@ -226,8 +271,10 @@ function App() {
         }
 
         if (message.type === "emotion_changed") {
+          affectEpoch.current += 1;
           setEmotion(message.emotion);
-          console.log("[Emotion] changed to:", message.emotion);
+          setMoodCause(message.cause);
+          console.log("[Emotion] changed to:", message.emotion, message.cause);
         }
 
         // 累计同一说话者的转录片段。
@@ -295,7 +342,6 @@ function App() {
 
           setState("idle");
           updateVisualState("idle");
-          setEmotion("calm");
 
           if (
             message.reason?.includes(
@@ -511,7 +557,7 @@ function App() {
               .filter(Boolean)
               .join(" ")}
             role="img"
-            aria-label={`阿七当前情绪：${emotionLabels[emotion]}，状态：${visualStateLabels[visualState]}`}
+            aria-label={`阿七当前情绪：${emotionLabels[emotion]}${moodCause ? `，还留着：${moodCause}` : ""}，状态：${visualStateLabels[visualState]}`}
           >
             <div className="orb-aura" />
 
@@ -534,6 +580,10 @@ function App() {
           <p className="emotion-status">
             当前情绪：{emotionLabels[emotion]}
           </p>
+
+          {moodCause ? (
+            <p className="emotion-status">还留着：{moodCause}</p>
+          ) : null}
 
           <p className="emotion-status">
             当前状态：{visualStateLabels[visualState]}

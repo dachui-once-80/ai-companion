@@ -36,6 +36,13 @@
       "when": 1791624638683,
       "tag": "0004_careful_winter_soldier",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791865444258,
+      "tag": "0005_companion_affect",
+      "breakpoints": true
     }
   ]
 }

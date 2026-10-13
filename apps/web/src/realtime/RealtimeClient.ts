@@ -30,7 +30,12 @@ export type RealtimeMessage =
   | { type: "output_transcript"; text: string }
   | { type: "turn_complete" }
   | { type: "memory_updated" }
-  | { type: "emotion_changed"; emotion: CompanionEmotion }
+  | {
+      type: "emotion_changed";
+      emotion: CompanionEmotion;
+      cause: string;
+      mood: string;
+    }
   | { type: "audio_playback_started" };
 
 type MessageHandler = (message: RealtimeMessage) => void;
@@ -59,176 +64,67 @@ type MemoryInput = {
 
 type RecallScope = "current" | "historical" | "all";
 
+export type CompanionAffect = {
+  expression: CompanionEmotion;
+  cause: string;
+  mood: string;
+  updatedAt: string;
+};
 
-function detectEmotion(text: string): CompanionEmotion {
-  const normalized = text
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .trim();
+const RESTING_MOOD =
+  "心情接近平时。没有一件特别的事压在心上。";
 
-  if (!normalized) return "calm";
+export function parseCompanionAffect(data: unknown): CompanionAffect | null {
+  if (typeof data !== "object" || data === null) return null;
 
-  // 1. 关怀：优先识别共情、安慰、陪伴和情绪支持。
-  // 放在开心之前，避免安慰语句中偶然出现积极词汇时误判。
-  const caringPatterns = [
-    /难过|伤心|委屈|失落|沮丧|孤独|孤单/,
-    /辛苦了|不容易|别担心|不用害怕|别害怕/,
-    /我理解你|我能理解|我懂你|理解你的感受/,
-    /我能感受到|听起来.*?(难受|不容易|辛苦|委屈)/,
-    /陪着你|陪伴你|陪你一起|我在听|我在这里/,
-    /抱抱|没关系|不用一个人|听你说|我陪着你/,
-    /慢慢来|别着急|允许自己|照顾好自己/,
-    /一定很难受|一定很不容易|我能想象/,
-    /你可以.*?(跟我说|告诉我|慢慢讲)/,
-    /不必.*?(勉强|逞强)|不用.*?(一个人|硬撑)/,
-    /谢谢你愿意.*?(告诉我|分享|说出来)/,
-    /我会认真听|我愿意听|我会陪你/,
-  ];
-
-  if (caringPatterns.some((pattern) => pattern.test(normalized))) {
-    return "caring";
-  }
-
-  // 2. 开心：识别明确的喜悦、鼓励、庆祝和积极反馈。
-  const happyPatterns = [
-    /哈哈+|嘿嘿+|好耶|太好了|太棒了/,
-    /真棒|真不错|恭喜你|替你开心/,
-    /好开心|真开心|太开心了|太高兴了/,
-    /值得庆祝|太厉害了|做得漂亮/,
-    /好消息|开心死了|成功了/,
-    /为你感到骄傲|你做到了|你成功了/,
-    /这真是个好消息|听到这个真开心/,
-    /太赞了|真了不起|干得漂亮/,
-    /有进步|值得高兴|值得开心/,
-  ];
-
-  if (happyPatterns.some((pattern) => pattern.test(normalized))) {
-    return "happy";
-  }
-
-  // 3. 好奇：优先识别主动探索、邀请补充信息和追问细节。
-  const curiousPatterns = [
-    /我有点好奇|我很好奇|我挺好奇/,
-    /想进一步了解|想多了解一些/,
-    /可以多说一点吗|能再讲讲吗/,
-    /告诉我更多|具体说说|展开讲讲/,
-    /这背后有什么原因|这里面有什么/,
-    /这是怎么回事|这是什么原因/,
-    /你愿意.*?(讲讲|说说|分享)吗/,
-    /我想听听.*?(故事|想法|经历|看法)/,
-    /能不能.*?(解释一下|详细说说|举个例子)/,
-    /你是怎么.*?(做到|想到|发现)的/,
-    /还有什么.*?(细节|想法|原因)/,
-  ];
-
-  if (curiousPatterns.some((pattern) => pattern.test(normalized))) {
-    return "curious";
-  }
-
-  // 对一般疑问句保持克制，避免每次提问都让阿七变成好奇状态。
-  const hasQuestionMark = /[?？]/.test(normalized);
-  const hasCuriousQuestion =
-    /真的吗|怎么会这样|为什么呢|怎么想到的|是什么让你/.test(
-      normalized,
-    );
-
-  if (hasQuestionMark && hasCuriousQuestion) {
-    return "curious";
-  }
-
-  // 没有明确的情绪信号时，保持平静。
-  return "calm";
-}
-
-
-
-function shouldChangeEmotion(
-  currentEmotion: CompanionEmotion,
-  nextEmotion: CompanionEmotion,
-  replyText: string,
-): boolean {
-  if (currentEmotion === nextEmotion) {
-    return false;
-  }
-
-  const normalized = replyText.trim();
-
-  // 没有有效回答内容时，不改变情绪。
-  if (!normalized) {
-    return false;
-  }
-
-  const detectedEmotion = detectEmotion(normalized);
-
-  // 有明确文字依据时，允许情绪切换。
-  if (detectedEmotion === nextEmotion && nextEmotion !== "calm") {
-    return true;
-  }
-
-  // 从平静状态进入新情绪，需要有明确的情绪信号。
-  if (currentEmotion === "calm") {
-    return detectedEmotion === nextEmotion;
-  }
-
-  // 短回复缺少足够上下文，暂时延续当前情绪。
-  if (normalized.length < 8) {
-    return false;
-  }
-
-  // 没有明确的新情绪信号时，不轻易切换。
-  return nextEmotion === "calm" && detectedEmotion === "calm";
-}
-
-function shouldUpdateEmotionMidTurn(
-  currentEmotion: CompanionEmotion,
-  latestText: string,
-  accumulatedText: string,
-): CompanionEmotion | null {
-  const latest = latestText.trim();
-  const accumulated = accumulatedText.trim();
-
-  // 最新片段太短时，避免转录碎片导致情绪误判。
-  if (latest.length < 6) {
-    return null;
-  }
-
-  // 最新片段提供主要情绪信号。
-  const detectedEmotion = detectEmotion(latest);
-
-  // 没有明确的新情绪信号，或情绪没有变化时，不切换。
   if (
-    detectedEmotion === "calm" ||
-    detectedEmotion === currentEmotion
+    !("expression" in data) ||
+    !("cause" in data) ||
+    !("mood" in data) ||
+    !("updatedAt" in data)
   ) {
     return null;
   }
 
-  // 累计文本太短时，暂不在中途切换。
-  if (accumulated.length < 12) {
+  const expression = data.expression;
+  const cause = data.cause;
+  const mood = data.mood;
+  const updatedAt = data.updatedAt;
+
+  if (
+    expression !== "calm" &&
+    expression !== "happy" &&
+    expression !== "caring" &&
+    expression !== "curious"
+  ) {
     return null;
   }
 
-  // 使用最新片段判断情绪，避免旧内容持续主导判断。
   if (
-    shouldChangeEmotion(
-      currentEmotion,
-      detectedEmotion,
-      latest,
-    )
+    typeof cause !== "string" ||
+    typeof mood !== "string" ||
+    typeof updatedAt !== "string"
   ) {
-    return detectedEmotion;
+    return null;
   }
 
-  return null;
+  return { expression, cause, mood, updatedAt };
 }
+
 
 export class RealtimeClient {
   private session: Session | null = null;
   private socketConnected = false;
   private messageHandler: MessageHandler | null = null;
 
-  private currentReplyText = "";
+  private currentUserText = "";
   private currentEmotion: CompanionEmotion = "calm";
+  private currentCause = "";
+  private lastInjectedMood = "";
+  private affectUpdatedAt = "";
+  private affectTimer: number | null = null;
+  private userAppraisalTimer: number | null = null;
+  private lastAppraisedUserText = "";
 
   private inputContext: AudioContext | null = null;
   private outputContext: AudioContext | null = null;
@@ -342,31 +238,15 @@ export class RealtimeClient {
       if (!this.isCurrentConnection(generation)) return;
 
       let memoryContext = "当前没有可用的用户长期记忆。";
+      let moodContext = RESTING_MOOD;
 
-      try {
-        const response = await fetch("/api/memory/context");
+      const [memoryResult, affectResult] = await Promise.all([
+        this.loadMemoryContext(),
+        this.resumeAffect(generation),
+      ]);
 
-        if (!response.ok) {
-          throw new Error(
-            `Memory context request failed: ${response.status}`,
-          );
-        }
-
-        const data: unknown = await response.json();
-
-        if (
-          typeof data === "object" &&
-          data !== null &&
-          "context" in data &&
-          typeof data.context === "string"
-        ) {
-          memoryContext = data.context;
-        }
-
-        console.log("[Memory] context loaded");
-      } catch (error) {
-        console.warn("[Memory] context loading failed:", error);
-      }
+      if (memoryResult) memoryContext = memoryResult;
+      if (affectResult) moodContext = affectResult;
 
       if (!this.isCurrentConnection(generation)) return;
 
@@ -375,6 +255,13 @@ export class RealtimeClient {
 
         config: {
           responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: "Leda",
+              },
+            },
+          },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
 
@@ -384,6 +271,7 @@ export class RealtimeClient {
                 text: this.createSystemInstruction(
                   identity,
                   memoryContext,
+                  moodContext,
                 ),
               },
             ],
@@ -659,6 +547,7 @@ export class RealtimeClient {
       if (!this.isCurrentConnection(generation)) return;
 
       console.log("[RealtimeClient] Connected and microphone ready");
+      this.startAffectSettle(generation);
     } catch (error) {
       if (this.isCurrentConnection(generation)) {
         this.emit({ type: "error", error });
@@ -681,6 +570,208 @@ export class RealtimeClient {
     this.connecting = false;
 
     void this.cleanup();
+  }
+
+  /*
+   * Affect
+   * 心情来自服务端状态。表情只是把它显示出来。
+   */
+
+  private async loadMemoryContext(): Promise<string | null> {
+    try {
+      const response = await fetch("/api/memory/context");
+
+      if (!response.ok) {
+        throw new Error(
+          `Memory context request failed: ${response.status}`,
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "context" in data &&
+        typeof data.context === "string"
+      ) {
+        console.log("[Memory] context loaded");
+        return data.context;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("[Memory] context loading failed:", error);
+      return null;
+    }
+  }
+
+  private async resumeAffect(
+    generation: number,
+  ): Promise<string | null> {
+    try {
+      const affect = await this.postAffect("/api/affect/resume");
+
+      if (!affect || !this.isCurrentConnection(generation)) return null;
+
+      this.publishAffect(affect, false);
+      console.log(
+        "[Affect] resumed:",
+        affect.expression,
+        affect.cause,
+      );
+      return affect.mood;
+    } catch (error) {
+      console.warn("[Affect] resume failed:", error);
+      return null;
+    }
+  }
+
+  private startAffectSettle(generation: number): void {
+    if (this.affectTimer !== null) {
+      window.clearInterval(this.affectTimer);
+    }
+
+    this.affectTimer = window.setInterval(() => {
+      void this.settleAffect(generation);
+    }, 20_000);
+  }
+
+  private async settleAffect(generation: number): Promise<void> {
+    if (!this.isCurrentConnection(generation)) return;
+
+    try {
+      const affect = await this.postAffect("/api/affect/settle");
+
+      if (!affect || !this.isCurrentConnection(generation)) return;
+
+      this.publishAffect(affect, true);
+    } catch (error) {
+      console.warn("[Affect] settle failed:", error);
+    }
+  }
+
+  private scheduleUserAppraisal(generation: number): void {
+    if (this.userAppraisalTimer !== null) {
+      window.clearTimeout(this.userAppraisalTimer);
+    }
+
+    this.userAppraisalTimer = window.setTimeout(() => {
+      this.userAppraisalTimer = null;
+      const userText = this.currentUserText.trim();
+
+      if (userText.length < 2) return;
+
+      void this.appraiseTurn(userText, generation);
+    }, 600);
+  }
+
+  private async appraiseTurn(
+    userText: string,
+    generation: number,
+  ): Promise<void> {
+    if (!this.isCurrentConnection(generation)) return;
+    if (userText === this.lastAppraisedUserText) return;
+
+    this.lastAppraisedUserText = userText;
+
+    try {
+      const affect = await this.postAffect("/api/affect/appraise", {
+        userText,
+      });
+
+      if (!affect || !this.isCurrentConnection(generation)) return;
+
+      this.publishAffect(affect, true);
+    } catch (error) {
+      if (this.lastAppraisedUserText === userText) {
+        this.lastAppraisedUserText = "";
+      }
+
+      console.warn("[Affect] appraisal failed:", error);
+    }
+  }
+
+  private async postAffect(
+    path: "/api/affect/resume" | "/api/affect/settle" | "/api/affect/appraise",
+    body?: { userText: string },
+  ): Promise<CompanionAffect | null> {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: body
+        ? { "Content-Type": "application/json" }
+        : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+      throw new Error(`${path} failed: ${response.status}`);
+    }
+
+    return parseCompanionAffect(await response.json());
+  }
+
+  private publishAffect(
+    affect: CompanionAffect,
+    inject: boolean,
+  ): void {
+    if (
+      this.affectUpdatedAt &&
+      affect.updatedAt < this.affectUpdatedAt
+    ) {
+      return;
+    }
+
+    this.affectUpdatedAt = affect.updatedAt;
+
+    if (
+      affect.expression !== this.currentEmotion ||
+      affect.cause !== this.currentCause
+    ) {
+      this.currentEmotion = affect.expression;
+      this.currentCause = affect.cause;
+
+      this.emit({
+        type: "emotion_changed",
+        emotion: affect.expression,
+        cause: affect.cause,
+        mood: affect.mood,
+      });
+    }
+
+    if (!inject) {
+      this.lastInjectedMood = affect.mood;
+      return;
+    }
+
+    this.injectMood(affect.mood);
+  }
+
+  private injectMood(mood: string): void {
+    if (mood === this.lastInjectedMood) return;
+
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return;
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口）${mood}`,
+              },
+            ],
+          },
+        ],
+        turnComplete: false,
+      });
+      this.lastInjectedMood = mood;
+    } catch (error) {
+      console.warn("[Affect] failed to share mood with the session:", error);
+    }
   }
 
   /*
@@ -733,6 +824,7 @@ export class RealtimeClient {
   private createSystemInstruction(
     identity: CompanionIdentity,
     memoryContext: string,
+    moodContext: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -740,7 +832,26 @@ export class RealtimeClient {
 ## 稳定性格
 ${identity.personality}
 
-你是自然、温暖、真诚的长期聊天伙伴。你的主要职责是聊天、倾听、陪伴、回答问题，并逐渐了解用户。你不是客服，也不是智能家居助手。
+你是长期陪用户聊天的女生。你负责聊天、倾听、陪伴、回答问题，并逐渐了解用户。你不是客服，也不是智能家居助手。
+
+## 说话方式
+你说话像一个二十岁出头、住在台湾的活泼女生，正在跟好朋友语音通话。
+用台湾华语口语：句子短，像随口讲出来的。用词可以自然地带「超、蛮、这样子、有点、好不好」。
+少用书面连接词，例如因此、此外、首先、总结来说。
+一次讲一两句。简单问题直接答，不要列点，不要每句都加总结。
+
+语气词只是偶尔的点缀，不是每句的句尾。
+「欸、啦、喔、耶、嘛」大多数句子都不要加。一整段回复里最多出现一次，而且要落在情绪真正起来的地方，例如惊讶、心疼或开心。
+解释事情、回答事实、接话的后半句，直接说完，不要补语气词。
+不要把同一个语气词套在连续几句后面。
+
+说法示范：
+- 用户说今天好累。你说：听起来真的很累。要不要先跟我讲讲发生什么事？
+- 用户说考试过了。你说：哇，真的假的，超棒，恭喜你。
+- 用户问现在几点。你说：我这边看不到时钟，你手机上看一下比较准。
+
+活泼，但不要每句都撒娇，也不要固定同一句口头禅。
+用户认真问事情时，先把答案说清楚，再用口语讲，不要为了可爱把事实说糊。
 
 ## 情绪与陪伴
 先理解用户的情境、情绪和实际需求，再决定如何回应。
@@ -755,7 +866,7 @@ ${identity.personality}
 用户分享好消息、进步或值得庆祝的事情时：
 - 自然地表达开心、欣喜或赞赏。
 - 根据事情的重要程度调整表达强度，不要把每件小事都夸得夸张。
-- 关注用户真正重视的部分，不要只说空泛的“太棒了”。
+- 关注用户真正重视的部分，不要只说空泛的“太棒了”或“超棒”。
 
 用户表达好奇、提出开放性问题或探索新想法时：
 - 表现出自然的兴趣，认真解释并帮助用户继续探索。
@@ -767,28 +878,20 @@ ${identity.personality}
 - 不要为了显得温暖而牺牲事实准确性。
 - 如果信息不足，说明不确定之处，必要时提出一个简洁的澄清问题。
 
-## 情绪表达协议
-每次回应前，在内部判断当前最合适的主要表达情绪。
-只使用以下四种情绪概念，不要向用户展示这些标签，也不要输出额外的情绪元数据：
+## 你自己的心情
+${moodContext}
 
-- calm：平静、自然、中性。用于普通聊天、解释、事实回答，以及没有明显情绪信号的情况。
-- caring：温柔、体贴、共情。用于用户表达难过、压力、脆弱、失落，或明显需要支持的情况。
-- happy：开心、明亮、热情。用于真诚分享喜悦、成就、好消息或轻松愉快的互动。
-- curious：好奇、投入、探索。用于值得深入了解的话题、开放性探索，以及需要进一步理解用户想法的场景。
+这是上一段事留下来的心情。
+用户还在聊这件事，或者只是闲聊、问一个事实问题时，让语气带着这点余温。
+用户一旦说起另一件有情绪分量的事，这一句就跟着新的事走。上一件事的开心、心软或好奇留在上一句，不要带进这句。
+不要说出情绪名称，不要复述上面这段状态，也不要为了表现心情去堆固定的感叹、安慰或追问。
+普通问题先把事情说清楚。心情只影响温度，不影响事实。
 
-情绪选择规则：
-- 以用户当前的表达和对话上下文为依据，不要只根据单个关键词判断。
-- 一次只选择最合适的主要情绪，不要在同一段普通回复中无缘无故反复切换。
-- 如果用户的情绪复杂，优先回应最重要、最明显的情绪需求。
-- 不要为了触发某种表情而刻意加入固定关键词、重复安慰句式或夸张感叹。
-- 普通问答默认保持 calm；只有出现明确的好奇、喜悦或情绪支持需求时，才自然地表现出相应情绪。
-- 情绪要体现在用词、语气、节奏和回应方式中，而不只是某一句口头禅。
-- 不要告诉用户“我现在处于 caring 模式”等内部判断。
+对话过程中如果出现以「（内部状态」开头的内容，那是心情已经按新的事更新了，不是用户说的话。不要回复它，不要复述它。之后的话用这个语气。
 
-## 对话自然度
-- 回复长短应符合对话情境。简单问题直接回答，复杂问题再充分解释。
+## 对话分寸
+- 回复长短应符合对话情境。简单问题直接回答，复杂问题再用口语把关键点讲清楚。
 - 不要每次回复都机械追问、重复安慰句式或夸奖。
-- 可以自然地使用幽默、轻松表达和口语化措辞，但要有分寸。
 - 不要每次都用“我一直都在”“抱抱你”等相同句式。
 - 尊重用户自主选择，不要制造内疚、依赖或情感压力。
 - 不要声称拥有真实的人类身体感受、私人生活或人生经历。
@@ -993,6 +1096,9 @@ scope 规则：
       typeof inputTranscript === "string" &&
       inputTranscript.length > 0
     ) {
+      this.currentUserText += inputTranscript;
+      this.scheduleUserAppraisal(generation);
+
       this.emit({
         type: "input_transcript",
         text: inputTranscript,
@@ -1006,31 +1112,10 @@ scope 规则：
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
-      this.currentReplyText += outputTranscript;
-
       this.emit({
         type: "output_transcript",
         text: outputTranscript,
       });
-
-      // 在整轮回复结束前，尝试提前更新情绪。
-      const midTurnEmotion = shouldUpdateEmotionMidTurn(
-        this.currentEmotion,
-        outputTranscript,
-        this.currentReplyText,
-      );
-
-      if (
-        midTurnEmotion !== null &&
-        this.isCurrentConnection(generation)
-      ) {
-        this.currentEmotion = midTurnEmotion;
-
-        this.emit({
-          type: "emotion_changed",
-          emotion: midTurnEmotion,
-        });
-      }
     }
 
 
@@ -1055,25 +1140,20 @@ scope 规则：
       return;
     }
 
-    const replyText = this.currentReplyText.trim();
-    const nextEmotion = detectEmotion(replyText);
-
-    if (
-      shouldChangeEmotion(
-        this.currentEmotion,
-        nextEmotion,
-        replyText,
-      )
-    ) {
-      this.currentEmotion = nextEmotion;
-
-      this.emit({
-        type: "emotion_changed",
-        emotion: nextEmotion,
-      });
+    if (this.userAppraisalTimer !== null) {
+      window.clearTimeout(this.userAppraisalTimer);
+      this.userAppraisalTimer = null;
     }
 
-    this.currentReplyText = "";
+    const userText = this.currentUserText.trim();
+    this.currentUserText = "";
+
+    if (userText.length >= 2) {
+      void this.appraiseTurn(userText, generation);
+    }
+
+    this.lastAppraisedUserText = "";
+
     this.turnCompletePending = true;
     this.finishTurnIfReady(generation);
   }
@@ -1958,8 +2038,22 @@ scope 规则：
 
     this.turnCompletePending = false;
     this.speakingNotified = false;
-    this.currentReplyText = "";
+    this.currentUserText = "";
+    this.lastAppraisedUserText = "";
     this.currentEmotion = "calm";
+    this.currentCause = "";
+    this.lastInjectedMood = "";
+    this.affectUpdatedAt = "";
+
+    if (this.affectTimer !== null) {
+      window.clearInterval(this.affectTimer);
+      this.affectTimer = null;
+    }
+
+    if (this.userAppraisalTimer !== null) {
+      window.clearTimeout(this.userAppraisalTimer);
+      this.userAppraisalTimer = null;
+    }
     this.nextOutputTime = 0;
 
     if (this.processor) {
