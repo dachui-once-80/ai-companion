@@ -5,7 +5,7 @@ import {
   type LiveServerMessage,
   type Session,
 } from "@google/genai";
-import { ASIDE_LINES } from "./asides";
+import { asideLineFor } from "./asides";
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -95,6 +95,28 @@ const SLOW_TOOLS = new Set([
   "recall_memory",
 ]);
 
+function weatherPlaceName(raw: string): string {
+  const text = raw.trim();
+
+  if (!text) return "";
+
+  const municipality = text.match(/^(北京|上海|天津|重庆)/);
+
+  if (municipality) return municipality[1];
+
+  const named = text.match(/^(.+?)市/);
+
+  if (named?.[1]) return named[1];
+
+  return text;
+}
+
+function residenceCityForWeather(memoryContext: string): string {
+  const match = memoryContext.match(/(?:^|\n)-\s*city:\s*([^\n]+)/);
+
+  return weatherPlaceName(match?.[1] ?? "");
+}
+
 type DialogueTurn = {
   role: "user" | "companion";
   text: string;
@@ -108,12 +130,56 @@ function localDateString(date = new Date()): string {
 }
 
 function dialogueWorthKeeping(batch: DialogueTurn[]): boolean {
-  const userText = batch
-    .filter((turn) => turn.role === "user")
-    .map((turn) => turn.text)
-    .join("");
+  const userTurns = batch.filter((turn) => turn.role === "user");
+  const userText = userTurns.map((turn) => turn.text).join("");
 
-  return userText.replace(/\s+/g, "").length >= 4;
+  if (userText.replace(/\s+/g, "").length < 4) return false;
+
+  return !userTurns.every((turn) => isShortLookup(turn.text));
+}
+
+function isShortLookup(text: string): boolean {
+  const compact = text.replace(/\s+/g, "");
+
+  if (compact.length < 2 || compact.length > 28) return false;
+  if (/我(叫|住|喜欢|决定|生日|在学|想记住)/.test(compact)) return false;
+
+  return /天气|气温|温度|下雨|降雨|刮风|风力|几度|冷不冷|热不热/.test(
+    compact,
+  );
+}
+
+class ConsolidationDeferred extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super("consolidation deferred");
+  }
+}
+
+function leadInTool(
+  calls: ReadonlyArray<{ name?: string }>,
+): string {
+  const names = new Set(calls.map((call) => call.name ?? ""));
+
+  if (names.has("get_weather")) return "get_weather";
+  if (names.has("web_search")) return "web_search";
+
+  return "recall_memory";
+}
+
+function readRetryAfter(data: unknown): number {
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !("retryAfterMs" in data)
+  ) {
+    return 0;
+  }
+
+  const value = data.retryAfterMs;
+
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+
+  return Math.max(0, value);
 }
 
 function savedCount(data: unknown): number {
@@ -306,16 +372,14 @@ export class RealtimeClient {
   private userTurnOpen = false;
   private spokeThisTurn = false;
 
-  // 查天气、搜索、回忆还在等结果时，用本地短句垫上，避免干等。
+  // 查天气、搜索、回忆还在等结果时，只垫一句，避免干等，也不连着说。
   private asideTimer: number | null = null;
-  private asideCursor = 0;
   private asidePlays = 0;
   private asideSources = new Set<AudioBufferSourceNode>();
   private toolsInFlight = 0;
   private suppressAsideFollowUp = false;
-  private pendingFollowUp: Promise<void> | null = null;
-  private waitingForResult = false;
   private resultAudioQueued = false;
+  private residenceCity = "";
   private playbackTail: Promise<void> = Promise.resolve();
 
   // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
@@ -447,6 +511,9 @@ export class RealtimeClient {
       if (memoryResult) memoryContext = memoryResult;
       if (affectResult) moodContext = affectResult;
 
+      const residenceCity = residenceCityForWeather(memoryContext);
+      this.residenceCity = residenceCity;
+
       if (!this.isCurrentConnection(generation)) return;
 
       const session = await ai.live.connect({
@@ -471,6 +538,7 @@ export class RealtimeClient {
                   identity,
                   memoryContext,
                   moodContext,
+                  residenceCity,
                 ),
               },
             ],
@@ -569,15 +637,17 @@ export class RealtimeClient {
 
                 {
                   name: "get_weather",
-                  description:
-                    "查询真实的实时天气和天气预报。用户询问当前天气、温度、降雨、风力或未来天气时调用。必须使用用户明确提供的城市，或对话中明确确认的当前位置；不能把长期记忆里的居住城市直接当作当前位置。如果无法确定地点，先询问用户所在城市。不要猜测天气。",
+                  description: residenceCity
+                    ? `查询真实的实时天气和天气预报。用户询问天气、温度、降雨或风力时立刻调用，不要先问城市。这句话里如果指了地点，city 用那个地点。没指地点时，city 用居住地${residenceCity}。只有用户明确说自己现在在别的地方，才不用${residenceCity}。不要编造天气。`
+                    : "查询真实的实时天气和天气预报。用户询问天气时，用他这句话里说的城市立刻调用。没说城市、档案里也没有居住地时，再问在哪个城市。不要编造天气。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
                       city: {
                         type: "string",
-                        description:
-                          "要查询天气的城市名称，例如 Los Angeles 或 上海。必须是明确确定的地点。",
+                        description: residenceCity
+                          ? `查询用的城市名。用户指定了地点就填指定的，否则填${residenceCity}。`
+                          : "要查询天气的城市名称，例如北京或上海。",
                       },
                     },
                     required: ["city"],
@@ -874,13 +944,18 @@ export class RealtimeClient {
           }
         } catch (error) {
           failed = true;
-          console.warn("[Memory] consolidation failed:", error);
           this.pendingDialogue = batch.concat(this.pendingDialogue);
-          this.scheduleConsolidation(this.consolidationDelay);
-          this.consolidationDelay = Math.min(
-            this.consolidationDelay * 2,
-            120_000,
-          );
+
+          if (error instanceof ConsolidationDeferred) {
+            this.scheduleConsolidation(error.retryAfterMs);
+          } else {
+            console.warn("[Memory] consolidation failed:", error);
+            this.scheduleConsolidation(this.consolidationDelay);
+            this.consolidationDelay = Math.min(
+              this.consolidationDelay * 2,
+              120_000,
+            );
+          }
         }
 
         if (!failed && this.pendingDialogue.length > 0) {
@@ -913,7 +988,14 @@ export class RealtimeClient {
       throw new Error(`consolidation failed: ${response.status}`);
     }
 
-    return savedCount(await response.json());
+    const data: unknown = await response.json();
+    const retryAfterMs = readRetryAfter(data);
+
+    if (retryAfterMs > 0) {
+      throw new ConsolidationDeferred(retryAfterMs);
+    }
+
+    return savedCount(data);
   }
 
   private async loadMemoryContext(): Promise<string | null> {
@@ -1166,6 +1248,7 @@ export class RealtimeClient {
     identity: CompanionIdentity,
     memoryContext: string,
     moodContext: string,
+    residenceCity: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -1225,8 +1308,17 @@ ${moodContext}
 ## 查资料时的接话
 get_weather、web_search、recall_memory 的结果不会马上回来。
 - 如果你在调用这三个工具之前，这一轮已经说过话，不要再补一句查找口头禅。
-- 工具结果里 lead_in_spoken 为 true 时，一句很短的口语已经说给用户听了。接着直接说查到的内容，不要把那句再说一遍，也不要说「我查一下」「我搜一下」「让我回忆一下」。
+- 工具结果里 lead_in_spoken 为 true 时，一句很短的口语已经说给用户听了：看天气是「我看看」，查资料是「我查查」，回想是「我想想」。接着直接说查到的内容，不要把那句再说一遍。
 - 普通闲聊、情绪陪伴，以及用不到这三个工具的问题，直接回答。不要先说「我查一下」。
+
+## 天气
+${
+  residenceCity
+    ? `档案里的居住地是${residenceCity}。用户问今天天气、温度、下雨或刮风，又没说另一个地点时，立刻用${residenceCity}调用 get_weather，然后按结果回答。不要先问「你在哪个城市」，也不要等他反问你才想起来。`
+    : "档案里还没有居住城市。用户问天气又没说地点时，再问他在哪。"
+}
+- 他这句话里说了别的城市，或说自己现在在别处，用他说的地点。
+- 查到之后直接说那个地方的天气，不要把天气编出来。
 
 ## 身份
 当前名字：${identity.currentName}
@@ -1582,11 +1674,12 @@ scope 规则：
     const needsAside = functionCalls.some((call) =>
       SLOW_TOOLS.has(call.name ?? ""),
     );
+    const asideTool = leadInTool(functionCalls);
 
     if (needsAside) this.toolsInFlight++;
 
     const asideReady = needsAside
-      ? this.armAside(generation)
+      ? this.armAside(generation, asideTool)
       : Promise.resolve();
 
     const responses: Array<{
@@ -1791,7 +1884,8 @@ scope 规则：
         }
 
         if (name === "get_weather") {
-          const city = this.extractStringArg(args, "city");
+          const stated = this.extractStringArg(args, "city");
+          const city = weatherPlaceName(stated ?? "") || this.residenceCity;
 
           if (!city) {
             responses.push({
@@ -2053,13 +2147,7 @@ scope 规则：
     if (needsAside) {
       await asideReady;
 
-      if (this.pendingFollowUp) {
-        await this.pendingFollowUp;
-      }
-
       if (this.asidePlays > 0 && !this.spokeThisTurn) {
-        this.waitingForResult = true;
-
         for (const item of responses) {
           if (!SLOW_TOOLS.has(item.name)) continue;
 
@@ -2101,8 +2189,6 @@ scope 规则：
     this.spokeThisTurn = false;
     this.asidePlays = 0;
     this.suppressAsideFollowUp = false;
-    this.pendingFollowUp = null;
-    this.waitingForResult = false;
     this.resultAudioQueued = false;
   }
 
@@ -2130,13 +2216,9 @@ scope 规则：
 
   private asideResolve: (() => void) | null = null;
 
-  // 她还没开口时，先把一句短口语排进播放队列，再把工具结果交回去。
-  private armAside(generation: number): Promise<void> {
-    if (
-      this.spokeThisTurn ||
-      this.asidePlays > 0 ||
-      ASIDE_LINES.length === 0
-    ) {
+  // 她还没开口时垫一句，然后马上把工具结果交回去。
+  private armAside(generation: number, toolName: string): Promise<void> {
+    if (this.spokeThisTurn || this.asidePlays > 0) {
       if (this.spokeThisTurn) {
         console.log("[Aside] 她已经接过话，不再叠一句");
       }
@@ -2167,30 +2249,27 @@ scope 规则：
           return;
         }
 
-        void this.playAside(generation, false).then(finish, finish);
+        void this.playAside(generation, toolName).then(finish, finish);
       }, 160);
     });
   }
 
   private async playAside(
     generation: number,
-    followUp: boolean,
+    toolName: string,
   ): Promise<void> {
     if (
       !this.isCurrentConnection(generation) ||
       this.spokeThisTurn ||
       this.suppressAsideFollowUp ||
       this.discardUnplayedAudio ||
-      this.asidePlays >= 3 ||
-      this.resultAudioQueued ||
-      (followUp &&
-        this.toolsInFlight === 0 &&
-        !this.waitingForResult)
+      this.asidePlays >= 1 ||
+      this.resultAudioQueued
     ) {
       return;
     }
 
-    const line = ASIDE_LINES[this.asideCursor % ASIDE_LINES.length];
+    const line = asideLineFor(toolName);
 
     if (!line) return;
 
@@ -2199,7 +2278,6 @@ scope 规则：
     try {
       played = await this.playAudio(line.pcm, generation, {
         aside: true,
-        followUp,
       });
     } catch (error) {
       console.error("[Aside] playback failed:", error);
@@ -2214,7 +2292,6 @@ scope 规则：
       return;
     }
 
-    this.asideCursor += 1;
     this.asidePlays += 1;
 
     console.log("[Aside] 接话", line.text);
@@ -2581,7 +2658,7 @@ scope 规则：
   private async playAudio(
     base64: string,
     generation: number,
-    options?: { aside?: boolean; followUp?: boolean; queued?: boolean },
+    options?: { aside?: boolean; queued?: boolean },
   ): Promise<boolean> {
     if (!options?.queued) {
       const run = this.playbackTail.then(() =>
@@ -2633,7 +2710,6 @@ scope 规则：
 
     if (!options?.aside) {
       this.resultAudioQueued = true;
-      this.waitingForResult = false;
     }
 
     const pcm = this.base64ToInt16(base64);
@@ -2694,17 +2770,6 @@ scope 规则：
         source.disconnect();
       } catch {
         // 节点可能已被断开。
-      }
-
-      if (
-        options?.aside &&
-        !this.spokeThisTurn &&
-        !this.suppressAsideFollowUp &&
-        !this.resultAudioQueued &&
-        this.asidePlays < 3 &&
-        (this.toolsInFlight > 0 || this.waitingForResult)
-      ) {
-        this.pendingFollowUp = this.playAside(generation, true);
       }
 
       this.finishTurnIfReady(generation);
@@ -2769,9 +2834,8 @@ scope 规则：
     this.asidePlays = 0;
     this.toolsInFlight = 0;
     this.suppressAsideFollowUp = false;
-    this.pendingFollowUp = null;
-    this.waitingForResult = false;
     this.resultAudioQueued = false;
+    this.residenceCity = "";
     this.playbackTail = Promise.resolve();
     this.asideSources.clear();
     this.currentUserText = "";

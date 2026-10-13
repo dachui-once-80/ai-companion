@@ -151,6 +151,20 @@ export function shouldRetarget(
   );
 }
 
+export function applyAppraisal(
+  state: AffectState,
+  appraisal: UtteranceAppraisal,
+  nowMs: number,
+): AffectState {
+  const projected = project(state, nowMs);
+
+  if (isNegligible(appraisal.impulse)) return projected;
+
+  return shouldRetarget(projected, appraisal)
+    ? retarget(projected, appraisal.impulse, nowMs)
+    : shift(projected, appraisal.impulse, nowMs);
+}
+
 export function reunionImpulse(existingCause: string): AffectImpulse {
   return {
     valence: 0.16,

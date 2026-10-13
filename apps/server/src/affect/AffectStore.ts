@@ -2,15 +2,14 @@ import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { companionAffect } from "../db/schema";
 import {
+  applyAppraisal,
   baselineAffect,
   describeMood,
   isCompanionEmotion,
   project,
-  retarget,
   reunionImpulse,
   REUNION_GAP_MS,
   shift,
-  shouldRetarget,
   type AffectState,
   type CompanionEmotion,
   type UtteranceAppraisal,
@@ -63,10 +62,7 @@ export class AffectStore {
     nowMs = Date.now(),
   ): AffectSnapshot {
     const row = this.read();
-    const projected = project(row.state, nowMs);
-    const next = shouldRetarget(projected, appraisal)
-      ? retarget(projected, appraisal.impulse, nowMs)
-      : projected;
+    const next = applyAppraisal(row.state, appraisal, nowMs);
 
     return this.commit(next, new Date(nowMs).toISOString());
   }

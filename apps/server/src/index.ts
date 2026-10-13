@@ -1119,6 +1119,30 @@ app.get("/api/memory/context", (_req, res) => {
   }
 });
 
+function quotaRetryMs(error: unknown): number | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const status =
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error
+      ? (error as { status: unknown }).status
+      : undefined;
+  const quota =
+    status === 429 ||
+    message.includes("RESOURCE_EXHAUSTED") ||
+    message.includes("Quota exceeded");
+
+  if (!quota) return null;
+
+  const delay = message.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
+
+  if (delay) {
+    return Math.ceil(Number(delay[1]) * 1000);
+  }
+
+  return 15 * 60 * 1000;
+}
+
 app.post("/api/memory/consolidate", async (req, res) => {
   try {
     const result = await consolidateConversation({
@@ -1150,6 +1174,26 @@ app.post("/api/memory/consolidate", async (req, res) => {
   } catch (error) {
     if (error instanceof ConsolidationInputError) {
       res.status(400).json({ error: error.message });
+      return;
+    }
+
+    const retryAfterMs = quotaRetryMs(error);
+
+    if (retryAfterMs !== null) {
+      const seconds = Math.max(1, Math.round(retryAfterMs / 1000));
+      console.warn(
+        `[Memory] consolidation paused for ${seconds}s (quota)`,
+      );
+      res.json({
+        saved: {
+          episodes: 0,
+          impressions: 0,
+          notes: 0,
+          profile: 0,
+          retired: 0,
+        },
+        retryAfterMs,
+      });
       return;
     }
 

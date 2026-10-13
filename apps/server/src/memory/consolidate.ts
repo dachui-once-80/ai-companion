@@ -326,7 +326,7 @@ export async function consolidateConversation(options: {
     .map((turn) => turn.text)
     .join("");
 
-  if (userText.replace(/\s+/g, "").length < 4) {
+  if (userText.replace(/\s+/g, "").length < 4 || isDisposableLookup(turns)) {
     return emptyResult();
   }
 
@@ -392,6 +392,25 @@ ${keys}
 都不要保存：密码、验证码、密钥、证件号、银行卡号，以及用户要求她换性格或换人设的话。
 
 importance 只用 low、medium、high。会反复影响以后怎么陪用户的用 high，其余用 medium 或 low。每类最多 4 条。`;
+}
+
+function isDisposableLookup(turns: DialogueTurn[]): boolean {
+  const userTurns = turns.filter((turn) => turn.role === "user");
+
+  if (userTurns.length === 0) return true;
+
+  return userTurns.every((turn) => isShortLookup(turn.text));
+}
+
+function isShortLookup(text: string): boolean {
+  const compact = text.replace(/\s+/g, "");
+
+  if (compact.length < 2 || compact.length > 28) return false;
+  if (/我(叫|住|喜欢|决定|生日|在学|想记住)/.test(compact)) return false;
+
+  return /天气|气温|温度|下雨|降雨|刮风|风力|几度|冷不冷|热不热/.test(
+    compact,
+  );
 }
 
 function emptyResult(): ConsolidationResult {
