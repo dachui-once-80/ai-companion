@@ -5,6 +5,7 @@ import {
   type LiveServerMessage,
   type Session,
 } from "@google/genai";
+import { ASIDE_LINES } from "./asides";
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -87,6 +88,12 @@ export type CompanionAffect = {
 
 const RESTING_MOOD =
   "心情接近平时。没有一件特别的事压在心上。";
+
+const SLOW_TOOLS = new Set([
+  "get_weather",
+  "web_search",
+  "recall_memory",
+]);
 
 type DialogueTurn = {
   role: "user" | "companion";
@@ -294,6 +301,22 @@ export class RealtimeClient {
 
   // 同一句插话的后续转写先别再打断，等她下一次真正开口后再恢复。
   private transcriptBargeReadyAt = 0;
+
+  // 这一轮用户开口之后，她有没有自己先出声。
+  private userTurnOpen = false;
+  private spokeThisTurn = false;
+
+  // 查天气、搜索、回忆还在等结果时，用本地短句垫上，避免干等。
+  private asideTimer: number | null = null;
+  private asideCursor = 0;
+  private asidePlays = 0;
+  private asideSources = new Set<AudioBufferSourceNode>();
+  private toolsInFlight = 0;
+  private suppressAsideFollowUp = false;
+  private pendingFollowUp: Promise<void> | null = null;
+  private waitingForResult = false;
+  private resultAudioQueued = false;
+  private playbackTail: Promise<void> = Promise.resolve();
 
   // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
   private playbackTurnSettled = false;
@@ -1199,6 +1222,12 @@ ${moodContext}
 - 不要每次都用“我一直都在”“抱抱你”等相同句式。
 - 不要为了维持积极气氛而忽略用户真正的问题。
 
+## 查资料时的接话
+get_weather、web_search、recall_memory 的结果不会马上回来。
+- 如果你在调用这三个工具之前，这一轮已经说过话，不要再补一句查找口头禅。
+- 工具结果里 lead_in_spoken 为 true 时，一句很短的口语已经说给用户听了。接着直接说查到的内容，不要把那句再说一遍，也不要说「我查一下」「我搜一下」「让我回忆一下」。
+- 普通闲聊、情绪陪伴，以及用不到这三个工具的问题，直接回答。不要先说「我查一下」。
+
 ## 身份
 当前名字：${identity.currentName}
 以前使用过的名字：${identity.previousNames.length > 0
@@ -1408,6 +1437,7 @@ scope 规则：
       typeof interimTranscript === "string" &&
       interimTranscript.length > 0
     ) {
+      this.openUserTurn();
       // 临时转写比最终转写更早，用来在她出声时立刻停播。
       this.bargeInFromUser(generation);
     }
@@ -1416,6 +1446,7 @@ scope 规则：
       typeof inputTranscript === "string" &&
       inputTranscript.length > 0
     ) {
+      this.openUserTurn();
       this.currentUserText += inputTranscript;
       this.scheduleUserAppraisal(generation);
 
@@ -1440,6 +1471,7 @@ scope 规则：
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
+      this.markCompanionSpoke();
       this.currentCompanionText += outputTranscript;
 
       if (this.awaitingCompanionText) {
@@ -1462,6 +1494,7 @@ scope 规则：
       });
 
       if (hasAudio && !this.discardUnplayedAudio) {
+        this.markCompanionSpoke();
         this.playbackTurnSettled = false;
       }
 
@@ -1482,6 +1515,10 @@ scope 规则：
       !content.turnComplete
     ) {
       return;
+    }
+
+    if (this.toolsInFlight === 0) {
+      this.userTurnOpen = false;
     }
 
     this.discardUnplayedAudio = false;
@@ -1542,12 +1579,23 @@ scope 规则：
 
     if (functionCalls.length === 0) return;
 
+    const needsAside = functionCalls.some((call) =>
+      SLOW_TOOLS.has(call.name ?? ""),
+    );
+
+    if (needsAside) this.toolsInFlight++;
+
+    const asideReady = needsAside
+      ? this.armAside(generation)
+      : Promise.resolve();
+
     const responses: Array<{
       name: string;
       id?: string;
       response: Record<string, unknown>;
     }> = [];
 
+    try {
     for (const call of functionCalls) {
       if (!this.isCurrentConnection(generation)) return;
 
@@ -2002,6 +2050,27 @@ scope 规则：
       }
     }
 
+    if (needsAside) {
+      await asideReady;
+
+      if (this.pendingFollowUp) {
+        await this.pendingFollowUp;
+      }
+
+      if (this.asidePlays > 0 && !this.spokeThisTurn) {
+        this.waitingForResult = true;
+
+        for (const item of responses) {
+          if (!SLOW_TOOLS.has(item.name)) continue;
+
+          item.response = {
+            ...item.response,
+            lead_in_spoken: true,
+          };
+        }
+      }
+    }
+
     if (
       responses.length === 0 ||
       !this.isCurrentConnection(generation) ||
@@ -2017,6 +2086,175 @@ scope 规则：
       });
     } catch (error) {
       console.error("[Gemini] Failed to send tool response:", error);
+    }
+    } finally {
+      if (needsAside) {
+        this.toolsInFlight = Math.max(0, this.toolsInFlight - 1);
+      }
+    }
+  }
+
+  private openUserTurn(): void {
+    if (this.userTurnOpen) return;
+
+    this.userTurnOpen = true;
+    this.spokeThisTurn = false;
+    this.asidePlays = 0;
+    this.suppressAsideFollowUp = false;
+    this.pendingFollowUp = null;
+    this.waitingForResult = false;
+    this.resultAudioQueued = false;
+  }
+
+  private markCompanionSpoke(): void {
+    this.cancelAsideTimer();
+
+    if (this.toolsInFlight > 0 && !this.spokeThisTurn) {
+      this.suppressAsideFollowUp = true;
+      this.stopAsidePlayback();
+    }
+
+    this.spokeThisTurn = true;
+  }
+
+  private cancelAsideTimer(): void {
+    if (this.asideTimer !== null) {
+      window.clearTimeout(this.asideTimer);
+      this.asideTimer = null;
+    }
+
+    const finish = this.asideResolve;
+    this.asideResolve = null;
+    finish?.();
+  }
+
+  private asideResolve: (() => void) | null = null;
+
+  // 她还没开口时，先把一句短口语排进播放队列，再把工具结果交回去。
+  private armAside(generation: number): Promise<void> {
+    if (
+      this.spokeThisTurn ||
+      this.asidePlays > 0 ||
+      ASIDE_LINES.length === 0
+    ) {
+      if (this.spokeThisTurn) {
+        console.log("[Aside] 她已经接过话，不再叠一句");
+      }
+
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      this.asideResolve = resolve;
+
+      this.asideTimer = window.setTimeout(() => {
+        this.asideTimer = null;
+        const finish = this.asideResolve;
+        this.asideResolve = null;
+
+        if (!finish) return;
+
+        if (
+          !this.isCurrentConnection(generation) ||
+          this.spokeThisTurn ||
+          this.discardUnplayedAudio
+        ) {
+          if (this.spokeThisTurn) {
+            console.log("[Aside] 她已经接过话，不再叠一句");
+          }
+
+          finish();
+          return;
+        }
+
+        void this.playAside(generation, false).then(finish, finish);
+      }, 160);
+    });
+  }
+
+  private async playAside(
+    generation: number,
+    followUp: boolean,
+  ): Promise<void> {
+    if (
+      !this.isCurrentConnection(generation) ||
+      this.spokeThisTurn ||
+      this.suppressAsideFollowUp ||
+      this.discardUnplayedAudio ||
+      this.asidePlays >= 3 ||
+      this.resultAudioQueued ||
+      (followUp &&
+        this.toolsInFlight === 0 &&
+        !this.waitingForResult)
+    ) {
+      return;
+    }
+
+    const line = ASIDE_LINES[this.asideCursor % ASIDE_LINES.length];
+
+    if (!line) return;
+
+    let played = false;
+
+    try {
+      played = await this.playAudio(line.pcm, generation, {
+        aside: true,
+        followUp,
+      });
+    } catch (error) {
+      console.error("[Aside] playback failed:", error);
+      return;
+    }
+
+    if (
+      !played ||
+      !this.isCurrentConnection(generation) ||
+      this.spokeThisTurn
+    ) {
+      return;
+    }
+
+    this.asideCursor += 1;
+    this.asidePlays += 1;
+
+    console.log("[Aside] 接话", line.text);
+
+    this.currentCompanionText += line.text;
+
+    if (this.awaitingCompanionText) {
+      this.armCompanionCapture(generation);
+    }
+
+    this.emit({
+      type: "output_transcript",
+      text: line.text,
+    });
+  }
+
+  private stopAsidePlayback(): void {
+    for (const source of this.asideSources) {
+      source.onended = null;
+
+      try {
+        source.stop();
+      } catch {
+        // 可能已经播完。
+      }
+
+      try {
+        source.disconnect();
+      } catch {
+        // 节点可能已经断开。
+      }
+
+      this.activeAudioSources.delete(source);
+    }
+
+    this.asideSources.clear();
+
+    if (this.activeAudioSources.size === 0) {
+      this.nextOutputTime = 0;
+      this.speakingNotified = false;
     }
   }
 
@@ -2306,6 +2544,10 @@ scope 规则：
   ): void {
     if (!this.isCurrentConnection(generation)) return;
 
+    this.cancelAsideTimer();
+    this.suppressAsideFollowUp = true;
+    this.asideSources.clear();
+
     this.playbackGeneration++;
     this.nextOutputTime = 0;
     this.speakingNotified = false;
@@ -2339,7 +2581,24 @@ scope 规则：
   private async playAudio(
     base64: string,
     generation: number,
-  ): Promise<void> {
+    options?: { aside?: boolean; followUp?: boolean; queued?: boolean },
+  ): Promise<boolean> {
+    if (!options?.queued) {
+      const run = this.playbackTail.then(() =>
+        this.playAudio(base64, generation, {
+          ...options,
+          queued: true,
+        }),
+      );
+
+      this.playbackTail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      return run;
+    }
+
     const context = this.outputContext;
 
     if (
@@ -2347,7 +2606,7 @@ scope 规则：
       !this.isCurrentConnection(generation) ||
       this.discardUnplayedAudio
     ) {
-      return;
+      return false;
     }
 
     const playbackGeneration = this.playbackGeneration;
@@ -2363,14 +2622,23 @@ scope 规则：
       !this.isCurrentConnection(generation) ||
       playbackGeneration !== this.playbackGeneration ||
       this.discardUnplayedAudio ||
-      context !== this.outputContext
+      context !== this.outputContext ||
+      (options?.aside &&
+        (this.spokeThisTurn ||
+          this.suppressAsideFollowUp ||
+          this.resultAudioQueued))
     ) {
-      return;
+      return false;
+    }
+
+    if (!options?.aside) {
+      this.resultAudioQueued = true;
+      this.waitingForResult = false;
     }
 
     const pcm = this.base64ToInt16(base64);
 
-    if (pcm.length === 0) return;
+    if (pcm.length === 0) return false;
 
     const buffer = context.createBuffer(
       1,
@@ -2395,6 +2663,10 @@ scope 规则：
 
     this.activeAudioSources.add(source);
 
+    if (options?.aside) {
+      this.asideSources.add(source);
+    }
+
     if (!this.speakingNotified) {
       this.speakingNotified = true;
 
@@ -2416,11 +2688,23 @@ scope 规则：
       }
 
       this.activeAudioSources.delete(source);
+      this.asideSources.delete(source);
 
       try {
         source.disconnect();
       } catch {
         // 节点可能已被断开。
+      }
+
+      if (
+        options?.aside &&
+        !this.spokeThisTurn &&
+        !this.suppressAsideFollowUp &&
+        !this.resultAudioQueued &&
+        this.asidePlays < 3 &&
+        (this.toolsInFlight > 0 || this.waitingForResult)
+      ) {
+        this.pendingFollowUp = this.playAside(generation, true);
       }
 
       this.finishTurnIfReady(generation);
@@ -2429,9 +2713,11 @@ scope 规则：
     try {
       source.start(startTime);
       this.nextOutputTime = startTime + buffer.duration;
+      return true;
     } catch (error) {
       source.onended = null;
       this.activeAudioSources.delete(source);
+      this.asideSources.delete(source);
 
       try {
         source.disconnect();
@@ -2477,6 +2763,17 @@ scope 规则：
     this.discardUnplayedAudio = false;
     this.playbackTurnSettled = false;
     this.transcriptBargeReadyAt = 0;
+    this.cancelAsideTimer();
+    this.userTurnOpen = false;
+    this.spokeThisTurn = false;
+    this.asidePlays = 0;
+    this.toolsInFlight = 0;
+    this.suppressAsideFollowUp = false;
+    this.pendingFollowUp = null;
+    this.waitingForResult = false;
+    this.resultAudioQueued = false;
+    this.playbackTail = Promise.resolve();
+    this.asideSources.clear();
     this.currentUserText = "";
     this.lastAppraisedUserText = "";
     this.currentEmotion = "calm";
