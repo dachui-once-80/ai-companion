@@ -195,9 +195,18 @@ export class ThoughtStore {
     views: string;
     unresolved: string;
     questions: string;
+    viewItems: Array<{ about: string; content: string }>;
   } {
+    const views = this.recentViews(VIEW_CONTEXT_LIMIT).filter(
+      (thought) => !isPersonaRewrite(thought.about, thought.content),
+    );
+
     return {
-      views: this.formatLines(this.recentViews(VIEW_CONTEXT_LIMIT), "还没有。"),
+      views: this.formatLines(views, "还没有。"),
+      viewItems: views.map((thought) => ({
+        about: thought.about,
+        content: thought.content,
+      })),
       unresolved: this.formatLines(
         this.recentOpen("unresolved", OPEN_CONTEXT_LIMIT),
         "还没有。",

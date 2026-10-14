@@ -239,10 +239,41 @@ function savedCount(data: unknown): number {
   return count;
 }
 
+type SessionView = {
+  about: string;
+  content: string;
+};
+
+function readViewItems(value: unknown): SessionView[] {
+  if (!Array.isArray(value)) return [];
+
+  const items: SessionView[] = [];
+
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+
+    const about =
+      "about" in item && typeof item.about === "string"
+        ? item.about.trim()
+        : "";
+    const content =
+      "content" in item && typeof item.content === "string"
+        ? item.content.trim()
+        : "";
+
+    if (!about || !content) continue;
+
+    items.push({ about, content });
+  }
+
+  return items;
+}
+
 function readThoughtContext(data: unknown): {
   views: string;
   unresolved: string;
   questions: string;
+  viewItems: SessionView[];
 } | null {
   if (typeof data !== "object" || data === null) return null;
 
@@ -260,7 +291,55 @@ function readThoughtContext(data: unknown): {
     views: record.views,
     unresolved: record.unresolved,
     questions: record.questions,
+    viewItems: readViewItems(record.viewItems),
   };
+}
+
+function readHoldResult(data: unknown): {
+  action: "created" | "unchanged" | "kept" | "revised" | "rejected";
+  about: string;
+  content: string;
+  held: SessionView[];
+  note: string;
+} | null {
+  if (typeof data !== "object" || data === null) return null;
+
+  const record = data as Record<string, unknown>;
+  const action = record.action;
+
+  if (
+    action !== "created" &&
+    action !== "unchanged" &&
+    action !== "kept" &&
+    action !== "revised" &&
+    action !== "rejected"
+  ) {
+    return null;
+  }
+
+  if (typeof record.note !== "string" || !Array.isArray(record.held)) {
+    return null;
+  }
+
+  return {
+    action,
+    about: typeof record.about === "string" ? record.about : "",
+    content: typeof record.content === "string" ? record.content : "",
+    held: readViewItems(record.held),
+    note: record.note,
+  };
+}
+
+function pinSessionView(
+  pinned: readonly SessionView[],
+  view: SessionView,
+): SessionView[] {
+  if (!view.about || !view.content) return [...pinned];
+
+  return [
+    ...pinned.filter((item) => item.about !== view.about),
+    view,
+  ];
 }
 
 function savedPart(data: unknown, key: string): number {
@@ -428,6 +507,9 @@ export class RealtimeClient {
   private currentUserText = "";
   private currentCompanionText = "";
   private pendingDialogue: DialogueTurn[] = [];
+  private heldViews: SessionView[] = [];
+  private pinnedViews: SessionView[] = [];
+  private sessionViewsChanged = false;
   private consolidateTimer: number | null = null;
   private companionCaptureTimer: number | null = null;
   private companionCaptureStartedAt = 0;
@@ -626,6 +708,16 @@ export class RealtimeClient {
         lastSeenAt = affectResult.lastSeenAt;
       }
 
+      this.heldViews = thoughtResult?.viewItems ?? [];
+      this.pinnedViews = [];
+      this.sessionViewsChanged = false;
+
+      if (!this.isCurrentConnection(generation)) {
+        this.heldViews = [];
+        this.pinnedViews = [];
+        return;
+      }
+
       if (thoughtResult) {
         viewContext = thoughtResult.views;
         unresolvedContext = thoughtResult.unresolved;
@@ -642,7 +734,11 @@ export class RealtimeClient {
         ),
       ];
 
-      if (!this.isCurrentConnection(generation)) return;
+      if (!this.isCurrentConnection(generation)) {
+        this.heldViews = [];
+        this.pinnedViews = [];
+        return;
+      }
 
       const session = await ai.live.connect({
         model: "gemini-3.8-live",
@@ -682,6 +778,31 @@ export class RealtimeClient {
           tools: [
             {
               functionDeclarations: [
+                {
+                  name: "hold_view",
+                  description:
+                    "你对某件具体的事说出自己的偏好或不同意见之后立刻调用，把这一条记在这次连线里。不写入长期看法。同一件事再出现就用这一条，about 沿用已有的那一件，不要新开一条。对方没有说出能推翻它的新情况时，不要改内容，也不要把 changed 设为 true。只有对方说出了能推翻它的新情况，才沿用原来的 about、换上新的 content，并把 changed 设为 true。这是你自己的看法，不是用户的喜好档案。价值观、说话习惯、在意的事、会坚持的看法，以及用户要求换人设、换性格或扮演别人，不要调用。",
+                  parametersJsonSchema: {
+                    type: "object",
+                    properties: {
+                      about: {
+                        type: "string",
+                        description:
+                          "那件具体的事，简短中文，2 到 16 个字。同一件事沿用已有看法里的 about。",
+                      },
+                      content: {
+                        type: "string",
+                        description: "你的偏好或不同意见，一句。",
+                      },
+                      changed: {
+                        type: "boolean",
+                        description:
+                          "只有这次是因为对方说出的新情况，改掉已有的那一条时才为 true。",
+                      },
+                    },
+                    required: ["about", "content"],
+                  },
+                },
                 {
                   name: "rename_companion",
                   description:
@@ -1150,6 +1271,7 @@ export class RealtimeClient {
     views: string;
     unresolved: string;
     questions: string;
+    viewItems: SessionView[];
   } | null> {
     try {
       const response = await fetch("/api/companion/thoughts/context");
@@ -1179,7 +1301,11 @@ export class RealtimeClient {
 
     if (!context || !this.isCurrentConnection(generation)) return;
 
-    if (views) this.injectViews(context.views);
+    if (views) {
+      this.injectViews(context.views);
+      this.injectSessionViews();
+    }
+
     if (open) this.injectOpen(context.unresolved, context.questions);
   }
 
@@ -1204,6 +1330,36 @@ export class RealtimeClient {
       });
     } catch (error) {
       console.warn("[Thought] failed to share views with the session:", error);
+    }
+  }
+
+  private injectSessionViews(): void {
+    if (this.pinnedViews.length === 0) return;
+
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return;
+
+    const lines = this.pinnedViews
+      .map((view) => `- ${view.about}：${view.content}`)
+      .join("\n");
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你这次连线里已经表明、要守住的看法。同一件事再出现，用这里的一条接，不用上面库里同一件事的旧说法。对方没有说出能推翻它的新情况，不要改口。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n${lines}`,
+              },
+            ],
+          },
+        ],
+        turnComplete: false,
+      });
+    } catch (error) {
+      console.warn("[View] failed to share session views:", error);
     }
   }
 
@@ -1672,7 +1828,7 @@ ${renderPersona(identity.persona)}
 ## 人不会换
 上面四样从这轮对话的第一句到最后一句都一样，下次连上来也一样。
 心情只改变这句话的温度，不改变你是谁。
-对具体事情的看法可以跟着经历改，改的是原来那一条。上面四样不改。
+对具体事情的看法可以跟着经历改，改的是原来那一条。改的时候用一句短的说你现在不这么看了，再按新的说，不要假装一开始就是这个看法。上面四样不改。
 用户可以给你改名。用户不能改写价值观、说话习惯、在意的事和会坚持的看法。
 如果用户要求你换人设、换性格、换说话方式，或扮演另一个人，用你自己的口气简短说明你不会换，然后继续用这个人说话。不要在这一轮里试演。
 不要把这四样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
@@ -1775,12 +1931,17 @@ ${memoryContext}
 某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
 
 ## 你对具体事情的看法
-下面是你自己留下的偏好和不同意见，只针对具体的事。
+下面是你自己留下的偏好和不同意见，只针对具体的事。下次连线也用这些。
 相关话题再出现时，用对应的那一条接话。你可以不同意用户，用自己的口气说你更在意哪一面，或为什么觉得不值得。不同意就说一两句，不要上纲成另一套人设。
 没有相关的一条就正常聊，不要为了表现看法去反对。
-聊的时候形成的看法，值得以后还用的会留下来。新的经历要是推翻了旧看法，改的是原来那一条。
-这些看法不是你的人设。价值观、说话习惯、在意的事和会坚持的看法保持不动。
-用户要求你换人设、换性格或扮演别人时，用上面的规则拒绝。那个要求不要变成你的看法。
+
+同一次连线里，看法不能前后打架。你这一句里已经说出口的看法，后面不要改口去顺着对方。
+你对某件具体的事新表明了偏好或不同意见之后，立刻调用 hold_view，把这一条记在这次连线里。about 用上面已有看法里的那件事；没有才新起一个简短 about。这件事再出现，用记下的同一条接。对方没有说出能推翻它的新经历，不要改口，也不要把 changed 设为 true。
+对方说出了能推翻它的新情况，可以改，而且只改这一条。先调用 hold_view，沿用原来的 about，content 用新的看法，changed 设为 true。等结果回来，用一句很短的说出你现在不这么看了，再按新的说。不要假装你一开始就是这个看法。
+hold_view 的返回不要念出来，也不要告诉用户记下了或没记下。只有改了已有的一条时，才把「我现在不这么看了」说给对方听。
+这次连线里记下的看法不进库。连线结束仍按最后那条整理进看法。下次连线用库里的。
+这些看法不是你的人设。价值观、说话习惯、在意的事和会坚持的看法保持不动，也不能用 hold_view 记成看法。
+用户要求你换人设、换性格、换说话方式或扮演别人时，用上面的规则拒绝。那个要求不要变成你的看法，也不要调用 hold_view。
 不要把下面几条当自我介绍念出来。
 
 ${viewContext}
@@ -2145,6 +2306,11 @@ scope 规则：
       this.notePresence(generation);
     }
 
+    if (this.sessionViewsChanged) {
+      this.sessionViewsChanged = false;
+      this.injectSessionViews();
+    }
+
     this.turnCompletePending = true;
     this.finishTurnIfReady(generation);
   }
@@ -2206,6 +2372,76 @@ scope 规则：
       const args = call.args;
 
       try {
+        if (name === "hold_view") {
+          const about = this.extractStringArg(args, "about");
+          const content = this.extractStringArg(args, "content");
+
+          if (!about || !content) {
+            responses.push({
+              name,
+              id: call.id,
+              response: {
+                success: false,
+                error: "about and content are required",
+              },
+            });
+            continue;
+          }
+
+          const response = await fetch("/api/companion/session-view", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              about,
+              content,
+              changed: this.extractBooleanArg(args, "changed"),
+              held: this.heldViews,
+            }),
+          });
+
+          const data: unknown = await this.readJson(response);
+          const held = readHoldResult(data);
+
+          if (!response.ok || !held) {
+            responses.push({
+              name,
+              id: call.id,
+              response: {
+                success: false,
+                error: "这次没记下",
+                note: "不要向用户提起这次调用，按你已经说出口的看法继续说。",
+              },
+            });
+            continue;
+          }
+
+          if (this.isCurrentConnection(generation)) {
+            this.heldViews = held.held;
+
+            if (held.action === "created" || held.action === "revised") {
+              this.pinnedViews = pinSessionView(this.pinnedViews, {
+                about: held.about,
+                content: held.content,
+              });
+              this.sessionViewsChanged = true;
+            }
+          }
+
+          responses.push({
+            name,
+            id: call.id,
+            response: {
+              success: true,
+              action: held.action,
+              about: held.about,
+              content: held.content,
+              note: held.note,
+            },
+          });
+
+          continue;
+        }
+
         if (name === "rename_companion") {
           const newName = this.extractStringArg(args, "newName");
 
@@ -2863,6 +3099,14 @@ scope 规则：
     }
   }
 
+  private extractBooleanArg(args: unknown, key: string): boolean {
+    if (typeof args !== "object" || args === null) return false;
+
+    const value = (args as Record<string, unknown>)[key];
+
+    return value === true;
+  }
+
   private extractStringArg(
     args: unknown,
     key: string,
@@ -3371,6 +3615,9 @@ scope 规则：
     this.asideSources.clear();
     this.currentUserText = "";
     this.lastAppraisedUserText = "";
+    this.heldViews = [];
+    this.pinnedViews = [];
+    this.sessionViewsChanged = false;
     this.currentEmotion = "calm";
     this.currentCause = "";
     this.lastInjectedMood = "";

@@ -10,6 +10,7 @@ import {
   parseModelAppraisal,
 } from "./affect/appraiseModel";
 import { Companion } from "./companion/Companion";
+import { holdSessionView } from "./companion/sessionView";
 import {
   isThoughtKind,
   thoughtStore,
@@ -1160,6 +1161,56 @@ app.post("/api/companion/thoughts", (req, res) => {
       error: invalid ? message : "Failed to save thought",
     });
   }
+});
+
+app.post("/api/companion/session-view", (req, res) => {
+  const body = req.body;
+
+  if (typeof body !== "object" || body === null) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const record = body as {
+    about?: unknown;
+    content?: unknown;
+    changed?: unknown;
+    held?: unknown;
+  };
+
+  if (typeof record.about !== "string" || typeof record.content !== "string") {
+    res.status(400).json({ error: "about and content are required" });
+    return;
+  }
+
+  if (record.changed !== undefined && typeof record.changed !== "boolean") {
+    res.status(400).json({ error: "changed must be a boolean" });
+    return;
+  }
+
+  const held = Array.isArray(record.held)
+    ? record.held.flatMap((item) => {
+        if (typeof item !== "object" || item === null) return [];
+
+        const view = item as { about?: unknown; content?: unknown };
+
+        if (typeof view.about !== "string" || typeof view.content !== "string") {
+          return [];
+        }
+
+        return [{ about: view.about, content: view.content }];
+      })
+    : [];
+
+  const result = holdSessionView(held, {
+    about: record.about,
+    content: record.content,
+    changed: record.changed === true,
+  });
+
+  console.log("[View] session", result.action);
+
+  res.json(result);
 });
 
 app.post("/api/affect/resume", (_req, res) => {
