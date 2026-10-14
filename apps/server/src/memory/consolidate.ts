@@ -1,4 +1,5 @@
 import {
+  inventsCompanionLife,
   isPersonaRewrite,
   subjectKey,
   type ThoughtStore,
@@ -28,6 +29,10 @@ export type ConsolidationResult = {
     profile: number;
     retired: number;
     views: number;
+    unresolved: number;
+    question: number;
+    closedUnresolved: number;
+    closedQuestion: number;
   };
 };
 
@@ -43,6 +48,10 @@ type ConsolidationPlan = {
   notes: Array<PlannedItem & { label: string }>;
   profile: Array<PlannedItem & { key: string }>;
   views: Array<{ about: string; content: string }>;
+  unresolved: Array<{ about: string; content: string }>;
+  resolveUnresolved: string[];
+  question: Array<{ about: string; content: string }>;
+  resolveQuestion: string[];
 };
 
 const MAX_TURNS = 40;
@@ -117,6 +126,36 @@ export const consolidationResponseSchema = {
         required: ["about", "content"],
       },
     },
+    unresolved: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          about: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["about", "content"],
+      },
+    },
+    resolveUnresolved: {
+      type: "array",
+      items: { type: "string" },
+    },
+    question: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          about: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["about", "content"],
+      },
+    },
+    resolveQuestion: {
+      type: "array",
+      items: { type: "string" },
+    },
   },
   required: [
     "episodes",
@@ -125,6 +164,10 @@ export const consolidationResponseSchema = {
     "notes",
     "profile",
     "views",
+    "unresolved",
+    "resolveUnresolved",
+    "question",
+    "resolveQuestion",
   ],
 };
 
@@ -268,6 +311,9 @@ export function parseConsolidationResult(
     viewsBySubject.set(subjectKey(about), { about, content });
   }
 
+  const unresolved = readOpenThought(record.unresolved);
+  const question = readOpenThought(record.question);
+
   return {
     episodes,
     impressions,
@@ -275,6 +321,10 @@ export function parseConsolidationResult(
     notes,
     profile,
     views: [...viewsBySubject.values()],
+    unresolved,
+    resolveUnresolved: readCloseSubjects(record.resolveUnresolved),
+    question,
+    resolveQuestion: readCloseSubjects(record.resolveQuestion),
   };
 }
 
@@ -290,6 +340,10 @@ export function applyConsolidation(
     profile: 0,
     retired: 0,
     views: 0,
+    unresolved: 0,
+    question: 0,
+    closedUnresolved: 0,
+    closedQuestion: 0,
   };
 
   for (const episode of plan.episodes) {
@@ -361,6 +415,48 @@ export function applyConsolidation(
     }
   }
 
+  for (const item of plan.unresolved) {
+    if (listedSubject(item.about, plan.resolveUnresolved)) continue;
+
+    try {
+      const result = thoughts.save({
+        kind: "unresolved",
+        about: item.about,
+        content: item.content,
+      });
+
+      if (result.action !== "unchanged") saved.unresolved += 1;
+    } catch (error) {
+      if (isRejectedThought(error)) continue;
+      throw error;
+    }
+  }
+
+  for (const about of plan.resolveUnresolved) {
+    saved.closedUnresolved += thoughts.close("unresolved", about);
+  }
+
+  for (const item of plan.question) {
+    if (listedSubject(item.about, plan.resolveQuestion)) continue;
+
+    try {
+      const result = thoughts.save({
+        kind: "question",
+        about: item.about,
+        content: item.content,
+      });
+
+      if (result.action !== "unchanged") saved.question += 1;
+    } catch (error) {
+      if (isRejectedThought(error)) continue;
+      throw error;
+    }
+  }
+
+  for (const about of plan.resolveQuestion) {
+    saved.closedQuestion += thoughts.close("question", about);
+  }
+
   return { saved };
 }
 
@@ -385,6 +481,8 @@ export async function consolidateConversation(options: {
       today,
       options.memory.describeForReview(),
       options.thoughts.describeViews(),
+      options.thoughts.describeOpen("unresolved"),
+      options.thoughts.describeOpen("question"),
       turns,
     ),
   );
@@ -404,6 +502,8 @@ function buildPrompt(
   today: string,
   known: string,
   views: string,
+  unresolved: string,
+  questions: string,
   turns: DialogueTurn[],
 ): string {
   const transcript = turns
@@ -427,12 +527,18 @@ ${known}
 她已经留下的看法（同一件事必须沿用原来的 about，这样会改原来那一条）：
 ${views}
 
+她还放不下的事（同一件事必须沿用原来的 about。这段话里有了结果，放进 resolveUnresolved，不要再写进 unresolved）：
+${unresolved}
+
+她当时没问完、还想问的问题（问过并得到回答，放进 resolveQuestion，不要再写进 question）：
+${questions}
+
 这段对话：
 ${transcript}
 
 「现场」不是用户在跟阿七说话。那是他转头跟别人说的，或旁边的人说的。不要把这些写成用户的档案、偏好或决定。值得留的话，写成当时身边发生的事，不要写成用户对阿七的倾诉。用户自己对阿七说的，才按原来的规则整理。
 
-只输出 JSON。六个字段都要在，可以是空数组。
+只输出 JSON。十个字段都要在，可以是空数组：episodes、impressions、retireImpressions、notes、profile、views、unresolved、resolveUnresolved、question、resolveQuestion。
 
 episodes：聊过的具体事情。以后用户问「昨天发生了什么」「前几天怎么了」时用得上。
 - 写发生了什么，一两句话，不要写成聊天记录。
@@ -465,9 +571,33 @@ views：她对具体事情自己的偏好或不同意见。例如觉得某件事
 - 不要写人设。价值观、说话习惯、在意的事、会坚持的看法不写进这里。
 - 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成看法。
 
-都不要保存：密码、验证码、密钥、证件号、银行卡号，以及用户要求她换性格、换人设或扮演别人的话。
+unresolved：这段话里还没结果、她会放心不下的事。最多 1 条。没有就空数组。
+- about 用简短中文，指那件事，2 到 16 个字。同一件事沿用上面已有的 about，不要新开一条。
+- content 用她自己的口气，一句，写还悬着的是什么。
+- 和上面已有的一样、还没结果，就不要再写。悬着的点变了，沿用原来的 about。
+- 闲聊、天气、已经有结果的，不要写。已经有结果的放进 resolveUnresolved。
+- 这是她还放不下的事，不是看法，不是档案，不是片段，也不是对近况的判断。
+- 不要写人设。价值观、说话习惯、在意的事、会坚持的看法不写进这里。
+- 不要编她的身体或私人生活。这是对话里还悬着的事，不是她自己的经历。
+- 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成 unresolved。
+- 现场里听到的，只有她真的会放心不下时才写。写成身边的事，不要写成用户的档案。
 
-importance 只用 low、medium、high。会反复影响以后怎么陪用户的用 high，其余用 medium 或 low。每类最多 4 条。`;
+resolveUnresolved：上面已有的事在这段话里有了结果时，只写下要收掉的 about。没有就空数组。最多 4 条。
+
+question：她当时没问完、以后还值得问的问题。最多 1 条。没有就空数组。
+- 是她没问完的，不是用户丢给她、她已经答过的问题。
+- about 用简短中文，指那件事，2 到 16 个字。同一件事沿用上面已有的 about。
+- content 是那个问题，一句。
+- 和上面已有的一样、还没问到，就不要再写。
+- 闲聊、天气、已经问完并得到回答的，不要写。已经问完的放进 resolveQuestion。
+- 不要写人设，不要编她的身体或私人生活。
+- 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成 question。
+
+resolveQuestion：上面那条问题在这段话里问过、并且得到回答时，只写下要收掉的 about。没有就空数组。最多 4 条。
+
+都不要保存：密码、验证码、密钥、证件号、银行卡号，阿七的身体或私人生活，以及用户要求她换性格、换人设或扮演别人的话。
+
+importance 只用 low、medium、high。会反复影响以后怎么陪用户的用 high，其余用 medium 或 low。档案、片段、判断、笔记和看法每类最多 4 条。unresolved 和 question 最多各 1 条。`;
 }
 
 function isDisposableLookup(turns: DialogueTurn[]): boolean {
@@ -478,6 +608,16 @@ function isDisposableLookup(turns: DialogueTurn[]): boolean {
   if (userTurns.length === 0) return true;
 
   return userTurns.every((turn) => isShortLookup(turn.text));
+}
+
+function isCasualWeather(about: string, content: string): boolean {
+  const text = `${about}${content}`.replace(/\s+/g, "");
+
+  if (!/天气|气温|温度|下雨|降雨|刮风|风力|几度|冷不冷|热不热/.test(text)) {
+    return false;
+  }
+
+  return !/还没|结果|担心|放心|家人|出事|住院|手术|取消|停课|受伤/.test(text);
 }
 
 function isShortLookup(text: string): boolean {
@@ -500,8 +640,69 @@ function emptyResult(): ConsolidationResult {
       profile: 0,
       retired: 0,
       views: 0,
+      unresolved: 0,
+      question: 0,
+      closedUnresolved: 0,
+      closedQuestion: 0,
     },
   };
+}
+
+function readOpenThought(
+  value: unknown,
+): Array<{ about: string; content: string }> {
+  for (const item of asObjects(value)) {
+    const about = readSubject(item.about);
+    const content = readContent(item.content);
+
+    if (!about || !content) continue;
+    if (isPersonaRewrite(about, content)) continue;
+    if (inventsCompanionLife(about, content)) continue;
+    if (isCasualWeather(about, content)) continue;
+
+    return [{ about, content }];
+  }
+
+  return [];
+}
+
+function readCloseSubjects(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const subjects: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of value.slice(0, MAX_ITEMS)) {
+    if (typeof item !== "string") continue;
+
+    const about = item.trim().replace(/\s+/g, "");
+
+    if (about.length < 2 || about.length > 300) continue;
+
+    const key = subjectKey(about);
+
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    subjects.push(about);
+  }
+
+  return subjects;
+}
+
+function listedSubject(about: string, subjects: string[]): boolean {
+  const key = subjectKey(about);
+
+  return subjects.some((item) => subjectKey(item) === key);
+}
+
+function isRejectedThought(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+
+  return (
+    message.includes("cannot change who she is") ||
+    message.includes("cannot invent her body")
+  );
 }
 
 function readSubject(value: unknown): string | null {

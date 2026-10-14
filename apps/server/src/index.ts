@@ -1079,7 +1079,7 @@ app.get("/api/companion/thoughts", (req, res) => {
 
 app.get("/api/companion/thoughts/context", (_req, res) => {
   try {
-    res.json({ context: thoughtStore.renderForConversation() });
+    res.json(thoughtStore.renderForConversation());
   } catch (error) {
     console.error("[Thought] context failed:", error);
     res.status(500).json({ error: "Failed to read thoughts" });
@@ -1149,8 +1149,8 @@ app.post("/api/companion/thoughts", (req, res) => {
       message.includes("cannot be empty") ||
       message.includes("too long") ||
       message.includes("needs the matter") ||
-      message.includes("Only a view") ||
-      message.includes("cannot change who she is");
+      message.includes("cannot change who she is") ||
+      message.includes("cannot invent her body");
 
     if (!invalid) {
       console.error("[Thought] save failed:", error);
@@ -1333,6 +1333,10 @@ app.post("/api/memory/consolidate", async (req, res) => {
           profile: 0,
           retired: 0,
           views: 0,
+          unresolved: 0,
+          question: 0,
+          closedUnresolved: 0,
+          closedQuestion: 0,
         },
         retryAfterMs,
       });

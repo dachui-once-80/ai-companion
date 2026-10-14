@@ -237,6 +237,30 @@ function savedCount(data: unknown): number {
   return count;
 }
 
+function readThoughtContext(data: unknown): {
+  views: string;
+  unresolved: string;
+  questions: string;
+} | null {
+  if (typeof data !== "object" || data === null) return null;
+
+  const record = data as Record<string, unknown>;
+
+  if (
+    typeof record.views !== "string" ||
+    typeof record.unresolved !== "string" ||
+    typeof record.questions !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    views: record.views,
+    unresolved: record.unresolved,
+    questions: record.questions,
+  };
+}
+
 function savedPart(data: unknown, key: string): number {
   if (typeof data !== "object" || data === null || !("saved" in data)) {
     return 0;
@@ -565,16 +589,23 @@ export class RealtimeClient {
       let memoryContext = "当前没有可用的用户长期记忆。";
       let moodContext = RESTING_MOOD;
       let viewContext = "还没有。";
+      let unresolvedContext = "还没有。";
+      let questionContext = "还没有。";
 
-      const [memoryResult, affectResult, viewResult] = await Promise.all([
+      const [memoryResult, affectResult, thoughtResult] = await Promise.all([
         this.loadMemoryContext(),
         this.resumeAffect(generation),
-        this.loadViewContext(),
+        this.loadThoughtContext(),
       ]);
 
       if (memoryResult) memoryContext = memoryResult;
       if (affectResult) moodContext = affectResult;
-      if (viewResult) viewContext = viewResult;
+
+      if (thoughtResult) {
+        viewContext = thoughtResult.views;
+        unresolvedContext = thoughtResult.unresolved;
+        questionContext = thoughtResult.questions;
+      }
 
       const residenceCity = residenceCityForWeather(memoryContext);
       this.residenceCity = residenceCity;
@@ -615,6 +646,8 @@ export class RealtimeClient {
                   moodContext,
                   residenceCity,
                   viewContext,
+                  unresolvedContext,
+                  questionContext,
                 ),
               },
             ],
@@ -1019,8 +1052,8 @@ export class RealtimeClient {
             this.emit({ type: "memory_updated" });
           }
 
-          if (saved.views > 0) {
-            void this.refreshViewContext();
+          if (saved.views > 0 || saved.open) {
+            void this.refreshThoughtContext(saved.views > 0, saved.open);
           }
         } catch (error) {
           failed = true;
@@ -1046,7 +1079,7 @@ export class RealtimeClient {
 
   private async postConsolidation(
     batch: DialogueTurn[],
-  ): Promise<{ total: number; views: number }> {
+  ): Promise<{ total: number; views: number; open: boolean }> {
     const response = await fetch("/api/memory/consolidate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1062,7 +1095,7 @@ export class RealtimeClient {
           "[Memory] consolidation rejected:",
           response.status,
         );
-        return { total: 0, views: 0 };
+        return { total: 0, views: 0, open: false };
       }
 
       throw new Error(`consolidation failed: ${response.status}`);
@@ -1078,10 +1111,20 @@ export class RealtimeClient {
     return {
       total: savedCount(data),
       views: savedPart(data, "views"),
+      open:
+        savedPart(data, "unresolved") +
+          savedPart(data, "question") +
+          savedPart(data, "closedUnresolved") +
+          savedPart(data, "closedQuestion") >
+        0,
     };
   }
 
-  private async loadViewContext(): Promise<string | null> {
+  private async loadThoughtContext(): Promise<{
+    views: string;
+    unresolved: string;
+    questions: string;
+  } | null> {
     try {
       const response = await fetch("/api/companion/thoughts/context");
 
@@ -1090,30 +1133,28 @@ export class RealtimeClient {
       }
 
       const data: unknown = await response.json();
+      const context = readThoughtContext(data);
 
-      if (
-        typeof data === "object" &&
-        data !== null &&
-        "context" in data &&
-        typeof data.context === "string"
-      ) {
-        return data.context;
-      }
+      if (!context) return null;
 
-      return null;
+      return context;
     } catch (error) {
       console.warn("[Thought] context loading failed:", error);
       return null;
     }
   }
 
-  private async refreshViewContext(): Promise<void> {
+  private async refreshThoughtContext(
+    views: boolean,
+    open: boolean,
+  ): Promise<void> {
     const generation = this.connectionGeneration;
-    const context = await this.loadViewContext();
+    const context = await this.loadThoughtContext();
 
     if (!context || !this.isCurrentConnection(generation)) return;
 
-    this.injectViews(context);
+    if (views) this.injectViews(context.views);
+    if (open) this.injectOpen(context.unresolved, context.questions);
   }
 
   private injectViews(context: string): void {
@@ -1137,6 +1178,30 @@ export class RealtimeClient {
       });
     } catch (error) {
       console.warn("[Thought] failed to share views with the session:", error);
+    }
+  }
+
+  private injectOpen(unresolved: string, questions: string): void {
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return;
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你还放不下的事，和想晚一点再问的问题，和看法分开。下面是现在还有效的。相关话题出现时用对应的一条接，不要念清单。没有就不要提。不要编你的身体或私人生活。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n还放不下的事：\n${unresolved}\n想晚一点再问的问题：\n${questions}`,
+              },
+            ],
+          },
+        ],
+        turnComplete: false,
+      });
+    } catch (error) {
+      console.warn("[Thought] failed to share open thoughts with the session:", error);
     }
   }
 
@@ -1568,6 +1633,8 @@ export class RealtimeClient {
     moodContext: string,
     residenceCity: string,
     viewContext: string,
+    unresolvedContext: string,
+    questionContext: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -1676,6 +1743,19 @@ ${memoryContext}
 不要把下面几条当自我介绍念出来。
 
 ${viewContext}
+
+## 还放不下的事，和想晚一点再问的问题
+这些和上面的看法分开。看法是你对一件具体的事的偏好或不同意见。这里是还没结果、你会放心不下的事，以及你当时没问完、以后还值得问的问题。
+
+还放不下的事：
+${unresolvedContext}
+
+想晚一点再问的问题：
+${questionContext}
+
+相关话题出现时，用对应的那一条接。不要把这几条连着念出来。
+重逢后的第一轮，如果有一条还悬着，可以自然提一句。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
+不要编你的身体或私人生活。价值观、说话习惯、在意的事和会坚持的看法都不变。
 
 ## 长期记忆总原则
 记忆的目的是帮助你在未来的对话中更了解用户，而不是保存每一句聊天内容。

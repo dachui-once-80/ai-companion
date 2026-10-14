@@ -6,10 +6,12 @@ import { contentKey } from "../memory/openMemory";
 /**
  * 她自己的念头。和档案、片段、判断、笔记分开存。
  *
- * unresolved：还放不下的事
+ * unresolved：还放不下的事。about 是那件事，content 是还悬着的点。
+ *       同一件事再出现并有了结果，就把这一条收掉。
  * view：对一件具体的事的看法。about 是那件事，content 是她的偏好或不同意见。
  *       同一件事再写，改原来那一条。不写人设，也不记下换人设的要求。
- * question：想晚一点再问的问题
+ * question：想晚一点再问的问题。about 是那件事，content 是问题。
+ *       问过并得到回答，就把这一条收掉。
  */
 export const THOUGHT_KINDS = ["unresolved", "view", "question"] as const;
 
@@ -27,6 +29,7 @@ export type CompanionThought = {
 const MAX_CONTENT_LENGTH = 500;
 const MAX_ABOUT_LENGTH = 300;
 const VIEW_CONTEXT_LIMIT = 30;
+const OPEN_CONTEXT_LIMIT = 8;
 
 const PERSONA_SUBJECTS = new Set([
   "人设",
@@ -68,6 +71,17 @@ export function isPersonaRewrite(about: string, content: string): boolean {
   );
 }
 
+/**
+ * 还放不下的事和想问的问题来自对话，不能写成她有身体、家人、恋人或自己的日常生活。
+ */
+export function inventsCompanionLife(about: string, content: string): boolean {
+  const text = `${about}${content}`.replace(/\s+/g, "");
+
+  return /我(的)?身体|我(男朋友|女朋友|老公|老婆)|我自己(的)?(爸|妈|家人|身体)|我(昨晚|今早|今天早上|刚才)(出门|去了|睡了|没睡|吃了|上班|下班|生病|感冒|发烧)|阿七(的)?(身体|家人|男朋友|女朋友|私人生活|房子|爸|妈)/.test(
+    text,
+  );
+}
+
 export type ThoughtSaveResult = {
   thought: CompanionThought;
   action: "created" | "updated" | "unchanged";
@@ -92,16 +106,23 @@ export class ThoughtStore {
       );
     }
 
-    if (input.kind === "view") {
-      if (!about) {
-        throw new Error("A view needs the matter it is about");
-      }
+    if (!about) {
+      throw new Error(matterRequired(input.kind));
+    }
 
-      if (isPersonaRewrite(about, content)) {
-        throw new Error("A view cannot change who she is");
-      }
-    } else if (about) {
-      throw new Error("Only a view can keep what it is about");
+    if (isPersonaRewrite(about, content)) {
+      throw new Error(
+        input.kind === "view"
+          ? "A view cannot change who she is"
+          : "A thought cannot change who she is",
+      );
+    }
+
+    if (
+      input.kind !== "view" &&
+      inventsCompanionLife(about, content)
+    ) {
+      throw new Error("A thought cannot invent her body or private life");
     }
 
     if (about.length > MAX_ABOUT_LENGTH) {
@@ -110,22 +131,32 @@ export class ThoughtStore {
       );
     }
 
-    if (input.kind === "view") {
-      return this.saveView(content, about);
-    }
+    return this.saveBySubject(input.kind, content, about);
+  }
 
-    const existing = this.list(input.kind).find(
-      (thought) =>
-        contentKey(thought.content) === contentKey(content) &&
-        contentKey(thought.about) === contentKey(about),
-    );
+  /**
+   * 同一件事有了结果，或那个问题问过并得到回答，就收掉。
+   * 收掉的不再进入下次对话。
+   */
+  close(kind: "unresolved" | "question", about: string): number {
+    const key = subjectKey(about);
 
-    if (existing) return { thought: existing, action: "unchanged" };
+    if (!key) return 0;
 
-    return {
-      thought: this.insert(input.kind, content, about),
-      action: "created",
-    };
+    const matches = this.list(kind).filter((thought) => {
+      if (thought.about.trim()) {
+        return subjectKey(thought.about) === key;
+      }
+
+      return (
+        contentKey(thought.content) === contentKey(about) ||
+        subjectKey(thought.content) === key
+      );
+    });
+
+    for (const match of matches) this.remove(match.id);
+
+    return matches.length;
   }
 
   /** 整理时对照已有看法，沿用原来的 about。 */
@@ -139,21 +170,43 @@ export class ThoughtStore {
       )
       .slice(0, 40);
 
-    return this.formatViews(views, "还没有。");
+    return this.formatLines(views, "还没有。");
   }
 
-  /** 下次对话里用。相关话题出现时拿对应的一条接话。 */
-  renderForConversation(): string {
-    const views = this.list("view")
+  /** 整理时对照还悬着的事或还想问的问题，沿用原来的 about。 */
+  describeOpen(kind: "unresolved" | "question"): string {
+    const items = this.list(kind)
       .slice()
       .sort(
         (a, b) =>
           b.updatedAt.localeCompare(a.updatedAt) ||
-          b.createdAt.localeCompare(a.createdAt),
+          a.createdAt.localeCompare(b.createdAt),
       )
-      .slice(0, VIEW_CONTEXT_LIMIT);
+      .slice(0, 40);
 
-    return this.formatViews(views, "还没有。");
+    return this.formatLines(items, "还没有。");
+  }
+
+  /**
+   * 下次对话里用。看法、还放不下的事、想晚一点再问的问题分开。
+   * 相关话题出现时拿对应的一条接，不念清单。
+   */
+  renderForConversation(): {
+    views: string;
+    unresolved: string;
+    questions: string;
+  } {
+    return {
+      views: this.formatLines(this.recentViews(VIEW_CONTEXT_LIMIT), "还没有。"),
+      unresolved: this.formatLines(
+        this.recentOpen("unresolved", OPEN_CONTEXT_LIMIT),
+        "还没有。",
+      ),
+      questions: this.formatLines(
+        this.recentOpen("question", OPEN_CONTEXT_LIMIT),
+        "还没有。",
+      ),
+    };
   }
 
   list(kind?: ThoughtKind): CompanionThought[] {
@@ -186,17 +239,21 @@ export class ThoughtStore {
     return row ? toThought(row) : null;
   }
 
-  private saveView(content: string, about: string): ThoughtSaveResult {
+  private saveBySubject(
+    kind: ThoughtKind,
+    content: string,
+    about: string,
+  ): ThoughtSaveResult {
     const key = subjectKey(about);
-    const matches = this.list("view").filter(
+    const matches = this.list(kind).filter(
       (thought) => subjectKey(thought.about) === key,
     );
 
     if (matches.length === 0) {
-      return { thought: this.insert("view", content, about), action: "created" };
+      return { thought: this.insert(kind, content, about), action: "created" };
     }
 
-    const original = this.viewsByAge(matches)[0];
+    const original = this.byAge(matches)[0];
 
     for (const extra of matches) {
       if (extra.id !== original.id) this.remove(extra.id);
@@ -255,8 +312,33 @@ export class ThoughtStore {
     db.delete(companionThoughts).where(eq(companionThoughts.id, id)).run();
   }
 
-  private viewsByAge(views = this.list("view")): CompanionThought[] {
-    return views
+  private recentViews(limit: number): CompanionThought[] {
+    return this.list("view")
+      .slice()
+      .sort(
+        (a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt) ||
+          b.createdAt.localeCompare(a.createdAt),
+      )
+      .slice(0, limit);
+  }
+
+  private recentOpen(
+    kind: "unresolved" | "question",
+    limit: number,
+  ): CompanionThought[] {
+    return this.list(kind)
+      .slice()
+      .sort(
+        (a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt) ||
+          b.createdAt.localeCompare(a.createdAt),
+      )
+      .slice(0, limit);
+  }
+
+  private byAge(thoughts: CompanionThought[]): CompanionThought[] {
+    return thoughts
       .slice()
       .sort(
         (a, b) =>
@@ -265,13 +347,26 @@ export class ThoughtStore {
       );
   }
 
-  private formatViews(views: CompanionThought[], empty: string): string {
-    if (views.length === 0) return empty;
+  private formatLines(thoughts: CompanionThought[], empty: string): string {
+    if (thoughts.length === 0) return empty;
 
-    return views
-      .map((view) => `- ${view.about}：${view.content}`)
+    return thoughts
+      .map((thought) =>
+        thought.about
+          ? `- ${thought.about}：${thought.content}`
+          : `- ${thought.content}`,
+      )
       .join("\n");
   }
+}
+
+function matterRequired(kind: ThoughtKind): string {
+  if (kind === "view") return "A view needs the matter it is about";
+  if (kind === "unresolved") {
+    return "An unresolved matter needs the matter it is about";
+  }
+
+  return "A question needs the matter it is about";
 }
 
 export const thoughtStore = new ThoughtStore();
