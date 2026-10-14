@@ -1,0 +1,1 @@
+ALTER TABLE `companion_affect` ADD `first_seen_at` text DEFAULT '' NOT NULL;

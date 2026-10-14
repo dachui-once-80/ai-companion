@@ -32,6 +32,7 @@ export const companionAffect = sqliteTable("companion_affect", {
   expression: text("expression").notNull(),
   updatedAt: text("updated_at").notNull(),
   lastSeenAt: text("last_seen_at").notNull(),
+  firstSeenAt: text("first_seen_at").notNull().default(""),
 });
 
 export const companionProfile = sqliteTable("companion_profile", {

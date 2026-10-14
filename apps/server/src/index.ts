@@ -9,6 +9,7 @@ import {
   appraisalPrompt,
   parseModelAppraisal,
 } from "./affect/appraiseModel";
+import { resolveCloseness } from "./companion/closeness";
 import { Companion } from "./companion/Companion";
 import { holdSessionView } from "./companion/sessionView";
 import {
@@ -1215,7 +1216,16 @@ app.post("/api/companion/session-view", (req, res) => {
 
 app.post("/api/affect/resume", (_req, res) => {
   try {
-    res.json(affectStore.resume());
+    const affect = affectStore.resume();
+    const closeness = resolveCloseness({
+      nowMs: Date.now(),
+      firstSeenAt: affectStore.peekFirstSeen(),
+      warmth: affectStore.peekWarmth(),
+      memories: memoryStore.getAll(),
+    });
+
+    console.log("[Closeness]", closeness.tier);
+    res.json({ ...affect, closeness: closeness.text });
   } catch (error) {
     console.error("[Affect] resume failed:", error);
     res.status(500).json({ error: "Failed to resume affect" });

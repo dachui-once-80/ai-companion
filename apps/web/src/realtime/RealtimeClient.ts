@@ -104,6 +104,17 @@ export type CompanionAffect = {
 const RESTING_MOOD =
   "心情接近平时。没有一件特别的事压在心上。";
 
+const JUST_MET_CLOSENESS = `这一次是「刚认识」。就按刚认识说话。
+刚认识：少把对方的事说成自己早就知道，少主动翻旧事，称呼保持普通。
+
+三档是：
+刚认识：少把对方的事说成自己早就知道，少主动翻旧事，称呼保持普通。
+常聊：相关的旧事可以自然接，仍要等对方把话说完。
+很熟：可以更直接，不同意时更短，也可以先提一件你们早就在聊的事。
+
+这三档都不改价值观、说话习惯、在意的事和会坚持的看法。
+不要出现亲昵到像恋人的话，除非用户自己把关系说成那样，并且已经写进记忆。`;
+
 const SLOW_TOOLS = new Set([
   "get_weather",
   "web_search",
@@ -414,6 +425,20 @@ function readLastSeenAt(data: object): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readCloseness(data: unknown): string {
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "closeness" in data &&
+    typeof data.closeness === "string" &&
+    data.closeness.trim().length > 0
+  ) {
+    return data.closeness;
+  }
+
+  return JUST_MET_CLOSENESS;
+}
+
 function parseStringList(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0) return null;
 
@@ -690,6 +715,7 @@ export class RealtimeClient {
 
       let memoryContext = "当前没有可用的用户长期记忆。";
       let moodContext = RESTING_MOOD;
+      let closenessContext = JUST_MET_CLOSENESS;
       let lastSeenAt: string | null = null;
       let viewContext = "还没有。";
       let unresolvedContext = "还没有。";
@@ -706,6 +732,7 @@ export class RealtimeClient {
       if (affectResult) {
         moodContext = affectResult.mood;
         lastSeenAt = affectResult.lastSeenAt;
+        closenessContext = affectResult.closeness;
       }
 
       this.heldViews = thoughtResult?.viewItems ?? [];
@@ -770,6 +797,7 @@ export class RealtimeClient {
                   unresolvedContext,
                   questionContext,
                   describeSessionTime(new Date(), lastSeenAt),
+                  closenessContext,
                 ),
               },
             ],
@@ -1418,9 +1446,20 @@ export class RealtimeClient {
 
   private async resumeAffect(
     generation: number,
-  ): Promise<{ mood: string; lastSeenAt: string | null } | null> {
+  ): Promise<{
+    mood: string;
+    lastSeenAt: string | null;
+    closeness: string;
+  } | null> {
     try {
-      const affect = await this.postAffect("/api/affect/resume");
+      const response = await fetch("/api/affect/resume", { method: "POST" });
+
+      if (!response.ok) {
+        throw new Error(`/api/affect/resume failed: ${response.status}`);
+      }
+
+      const data: unknown = await response.json();
+      const affect = parseCompanionAffect(data);
 
       if (!affect || !this.isCurrentConnection(generation)) return null;
 
@@ -1430,7 +1469,11 @@ export class RealtimeClient {
         affect.expression,
         affect.cause,
       );
-      return { mood: affect.mood, lastSeenAt: affect.lastSeenAt };
+      return {
+        mood: affect.mood,
+        lastSeenAt: affect.lastSeenAt,
+        closeness: readCloseness(data),
+      };
     } catch (error) {
       console.warn("[Affect] resume failed:", error);
       return null;
@@ -1818,6 +1861,7 @@ export class RealtimeClient {
     unresolvedContext: string,
     questionContext: string,
     timeContext: string,
+    closenessContext: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -1833,10 +1877,13 @@ ${renderPersona(identity.persona)}
 如果用户要求你换人设、换性格、换说话方式，或扮演另一个人，用你自己的口气简短说明你不会换，然后继续用这个人说话。不要在这一轮里试演。
 不要把这四样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
 
+## 你们现在的远近
+${closenessContext}
+
 ## 时间
 ${timeContext}
 
-隔了几个小时以上再见面，第一句可以带上这段空档，但只接上次没说完的事，或轻轻打个招呼。不要汇报你这两天做了什么。
+隔了几个小时以上再见面，第一句可以带上这段空档，但只接上次没说完的事，或轻轻打个招呼。要不要先把旧事说出来，按你们现在的远近。不要汇报你这两天做了什么。
 不到几个小时，就不要在第一句提分开了多久。
 不要编你睡过、吃过，或度过了怎样的一天。这段空档不是你的经历。
 很晚或一大清早，把句子收短，语气跟着钟点。人设不变。不要因此编你睡没睡、起没起。
@@ -1956,7 +2003,7 @@ ${unresolvedContext}
 ${questionContext}
 
 相关话题出现时，用对应的那一条接。不要把这几条连着念出来。
-重逢后的第一轮，如果有一条还悬着，可以自然提一句。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
+重逢后要不要先提一条还悬着的事，按你们现在的远近。刚认识不要为了这条主动开口。常聊等对方聊到相关的事再接。很熟才可以先提其中一件。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
 不要编你的身体或私人生活。价值观、说话习惯、在意的事和会坚持的看法都不变。
 
 ## 长期记忆总原则

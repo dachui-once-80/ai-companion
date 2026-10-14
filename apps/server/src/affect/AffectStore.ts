@@ -28,6 +28,7 @@ export type AffectSnapshot = {
 type AffectRow = {
   state: AffectState;
   lastSeenAt: string;
+  firstSeenAt: string;
 };
 
 export class AffectStore {
@@ -81,6 +82,15 @@ export class AffectStore {
     return this.read().state.expression;
   }
 
+  peekWarmth(): number {
+    return this.read().state.warmth;
+  }
+
+  /** 第一次连上的时间。记下之后不再改。 */
+  peekFirstSeen(): string {
+    return this.read().firstSeenAt;
+  }
+
   private read(): AffectRow {
     const existing = db
       .select()
@@ -89,9 +99,21 @@ export class AffectStore {
       .get();
 
     if (existing) {
+      const firstSeenAt = existing.firstSeenAt.trim()
+        ? existing.firstSeenAt
+        : existing.lastSeenAt;
+
+      if (firstSeenAt !== existing.firstSeenAt) {
+        db.update(companionAffect)
+          .set({ firstSeenAt })
+          .where(eq(companionAffect.id, AFFECT_ID))
+          .run();
+      }
+
       return {
         state: toState(existing),
         lastSeenAt: existing.lastSeenAt,
+        firstSeenAt,
       };
     }
 
@@ -102,10 +124,11 @@ export class AffectStore {
       .values({
         id: AFFECT_ID,
         ...toRow(created, lastSeenAt),
+        firstSeenAt: lastSeenAt,
       })
       .run();
 
-    return { state: created, lastSeenAt };
+    return { state: created, lastSeenAt, firstSeenAt: lastSeenAt };
   }
 
   private commit(state: AffectState, lastSeenAt: string): AffectSnapshot {
