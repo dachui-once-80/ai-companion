@@ -22,6 +22,7 @@ export type AffectSnapshot = {
   cause: string;
   mood: string;
   updatedAt: string;
+  lastSeenAt: string;
 };
 
 type AffectRow = {
@@ -32,16 +33,21 @@ type AffectRow = {
 export class AffectStore {
   resume(nowMs = Date.now()): AffectSnapshot {
     const row = this.read();
-    const elapsedSinceSeen = elapsedSince(row.lastSeenAt, nowMs);
+    const previousSeenAt = row.lastSeenAt;
+    const elapsedSinceSeen = elapsedSince(previousSeenAt, nowMs);
     let next = project(row.state, nowMs);
-    let lastSeenAt = row.lastSeenAt;
+    let lastSeenAt = previousSeenAt;
 
     if (elapsedSinceSeen >= REUNION_GAP_MS) {
       next = shift(next, reunionImpulse(next.cause), nowMs);
       lastSeenAt = new Date(nowMs).toISOString();
     }
 
-    return this.commit(next, lastSeenAt);
+    const saved = this.commit(next, lastSeenAt);
+
+    // 库里的时间在隔了三小时后会改成现在，用来挡住下一次心情脉冲。
+    // 这一次交出去的仍是连上之前记下的 lastSeenAt，会话才能知道空档。
+    return { ...saved, lastSeenAt: previousSeenAt };
   }
 
   settle(nowMs = Date.now()): AffectSnapshot {
@@ -127,6 +133,7 @@ export class AffectStore {
       cause: state.cause,
       mood: describeMood(state),
       updatedAt: state.updatedAt,
+      lastSeenAt,
     };
   }
 }

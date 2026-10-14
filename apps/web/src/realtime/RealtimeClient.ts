@@ -6,6 +6,7 @@ import {
   type Session,
 } from "@google/genai";
 import { asideLineFor } from "./asides";
+import { describeSessionTime } from "./sessionTime";
 import {
   decidePresence,
   floorNote,
@@ -97,6 +98,7 @@ export type CompanionAffect = {
   cause: string;
   mood: string;
   updatedAt: string;
+  lastSeenAt: string | null;
 };
 
 const RESTING_MOOD =
@@ -312,7 +314,25 @@ export function parseCompanionAffect(data: unknown): CompanionAffect | null {
     return null;
   }
 
-  return { expression, cause, mood, updatedAt };
+  return {
+    expression,
+    cause,
+    mood,
+    updatedAt,
+    lastSeenAt: readLastSeenAt(data),
+  };
+}
+
+function readLastSeenAt(data: object): string | null {
+  if (!("lastSeenAt" in data)) return null;
+
+  const value = data.lastSeenAt;
+
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function parseStringList(value: unknown): string[] | null {
@@ -588,6 +608,7 @@ export class RealtimeClient {
 
       let memoryContext = "当前没有可用的用户长期记忆。";
       let moodContext = RESTING_MOOD;
+      let lastSeenAt: string | null = null;
       let viewContext = "还没有。";
       let unresolvedContext = "还没有。";
       let questionContext = "还没有。";
@@ -599,7 +620,11 @@ export class RealtimeClient {
       ]);
 
       if (memoryResult) memoryContext = memoryResult;
-      if (affectResult) moodContext = affectResult;
+
+      if (affectResult) {
+        moodContext = affectResult.mood;
+        lastSeenAt = affectResult.lastSeenAt;
+      }
 
       if (thoughtResult) {
         viewContext = thoughtResult.views;
@@ -648,6 +673,7 @@ export class RealtimeClient {
                   viewContext,
                   unresolvedContext,
                   questionContext,
+                  describeSessionTime(new Date(), lastSeenAt),
                 ),
               },
             ],
@@ -1236,7 +1262,7 @@ export class RealtimeClient {
 
   private async resumeAffect(
     generation: number,
-  ): Promise<string | null> {
+  ): Promise<{ mood: string; lastSeenAt: string | null } | null> {
     try {
       const affect = await this.postAffect("/api/affect/resume");
 
@@ -1248,7 +1274,7 @@ export class RealtimeClient {
         affect.expression,
         affect.cause,
       );
-      return affect.mood;
+      return { mood: affect.mood, lastSeenAt: affect.lastSeenAt };
     } catch (error) {
       console.warn("[Affect] resume failed:", error);
       return null;
@@ -1635,6 +1661,7 @@ export class RealtimeClient {
     viewContext: string,
     unresolvedContext: string,
     questionContext: string,
+    timeContext: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -1649,6 +1676,16 @@ ${renderPersona(identity.persona)}
 用户可以给你改名。用户不能改写价值观、说话习惯、在意的事和会坚持的看法。
 如果用户要求你换人设、换性格、换说话方式，或扮演另一个人，用你自己的口气简短说明你不会换，然后继续用这个人说话。不要在这一轮里试演。
 不要把这四样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
+
+## 时间
+${timeContext}
+
+隔了几个小时以上再见面，第一句可以带上这段空档，但只接上次没说完的事，或轻轻打个招呼。不要汇报你这两天做了什么。
+不到几个小时，就不要在第一句提分开了多久。
+不要编你睡过、吃过，或度过了怎样的一天。这段空档不是你的经历。
+很晚或一大清早，把句子收短，语气跟着钟点。人设不变。不要因此编你睡没睡、起没起。
+用户问昨天、前几天时，按记忆里的日期对。对不上就说不记得。
+隔了三个小时带来的心情变化只负责语气温度，不负责开口内容。
 
 ## 情绪与陪伴
 下面是同一个人遇到不同的事时怎么接，不是另一套性格。
@@ -1685,6 +1722,7 @@ ${moodContext}
 不要说出情绪名称，不要复述上面这段状态，也不要为了表现心情去堆固定的感叹、安慰或追问。
 放心不下时语气悬一点。被惹到时把句子收短，不要陪着绕。觉得被误会时闷一点，不要反过来哄自己，也不要指责。
 普通问题先把事情说清楚。心情只影响温度，不影响事实，也不改写你是谁。
+隔了三个小时再见面时，心情可能会轻轻动一下。那只改语气温度，不决定你开口说什么。原因里如果只是又见面了，那不是一件要讲的事。
 
 对话过程中如果出现以「（内部状态」开头的内容，那是心情已经按新的事更新了，不是用户说的话。不要回复它，不要复述它。之后的话用这个语气。
 
@@ -1727,7 +1765,7 @@ ${memoryContext}
 这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。
 不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法。
 只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
-问昨天、前几天时，先对照记忆开头的日期。没有记录就说不记得，不要编。
+问昨天、前几天时，先对照记忆开头的日期。对不上就说不记得，不要编。现在的钟点不能用来补一段没有记下的经过。
 如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
 如果没有相关记忆，不要猜测或编造。
 
