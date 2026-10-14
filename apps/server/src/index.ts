@@ -1200,14 +1200,15 @@ app.post("/api/affect/appraise", async (req, res) => {
 
   try {
     const cause = affectStore.peekCause();
-    const local = appraiseLocally(userText, cause);
+    const expression = affectStore.peekExpression();
+    const local = appraiseLocally(userText, cause, expression);
     let appraisal = local.appraisal;
 
     if (shouldConsultModel(userText, local.confident)) {
       try {
         const response = await gemini.models.generateContent({
           model: "gemini-3.8-flash",
-          contents: appraisalPrompt(userText, cause),
+          contents: appraisalPrompt(userText, cause, expression),
           config: {
             temperature: 0,
             abortSignal: AbortSignal.timeout(12_000),
@@ -1218,8 +1219,15 @@ app.post("/api/affect/appraise", async (req, res) => {
         const parsed = parseModelAppraisal(response.text ?? "", userText);
 
         if (parsed) {
-          appraisal = parsed.appraisal;
-          console.log("[Affect] model toward", parsed.toward);
+          const repairWithoutFriction =
+            parsed.appraisal.relation === "repair" &&
+            expression !== "annoyed" &&
+            expression !== "wronged";
+
+          if (!repairWithoutFriction) {
+            appraisal = parsed.appraisal;
+            console.log("[Affect] model toward", parsed.toward);
+          }
         }
       } catch (error) {
         console.warn("[Affect] model appraisal skipped:", error);

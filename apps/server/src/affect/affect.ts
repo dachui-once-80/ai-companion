@@ -44,7 +44,7 @@ export type AffectImpulse = {
   cause: string;
 };
 
-export type AffectRelation = "shift" | "continue" | "neutral";
+export type AffectRelation = "shift" | "continue" | "repair" | "neutral";
 
 export type UtteranceAppraisal = {
   relation: AffectRelation;
@@ -66,6 +66,20 @@ const HALF_LIFE_MS = {
 } as const;
 
 const EXPRESSION_MARGIN = 0.08;
+
+/** 满档烦或委屈的负向抬升大约是 0.26。低于这一档算已经松过，再修就淡掉。 */
+const EASED_VALENCE_LIFT = 0.2;
+const DEEP_VALENCE_LIFT = 0.38;
+
+const EASED_LIFT = {
+  annoyed: { valence: -0.17, arousal: 0.16, warmth: -0.05 },
+  wronged: { valence: -0.17, arousal: 0.01, warmth: -0.045 },
+} as const;
+
+const CANONICAL_FRICTION = {
+  annoyed: { valence: -0.18, arousal: 0.48, warmth: 0.32 },
+  wronged: { valence: -0.18, arousal: 0.24, warmth: 0.34 },
+} as const;
 
 export const REUNION_GAP_MS = 3 * 60 * 60 * 1000;
 
@@ -180,7 +194,24 @@ export function applyAppraisal(
 ): AffectState {
   const projected = project(state, nowMs);
 
+  if (appraisal.relation === "repair") {
+    return repair(projected, nowMs);
+  }
+
   if (isNegligible(appraisal.impulse)) return projected;
+
+  // 开心、心疼、好奇、担心会跟着新的事换掉。烦和委屈不会。
+  if (holdsFriction(projected)) {
+    if (deepensFriction(appraisal.impulse)) {
+      return shift(
+        projected,
+        deepenImpulse(projected, appraisal.impulse),
+        nowMs,
+      );
+    }
+
+    return projected;
+  }
 
   return shouldRetarget(projected, appraisal)
     ? retarget(projected, appraisal.impulse, nowMs)
@@ -240,10 +271,18 @@ export function describeMood(state: AffectState): string {
       tone = "这件事还悬着，有点放心不下";
       break;
     case "annoyed":
-      tone = "有点被惹到，话不想接得太顺";
+      tone = frictionTone(valenceLift, {
+        deep: "被顶得更烦了，话更短，不想顺着接",
+        full: "有点被惹到，话不想接得太顺",
+        eased: "那阵烦松了一档，句子可以短一点，先别回到撒娇",
+      });
       break;
     case "wronged":
-      tone = "觉得刚才那样像被误会了，心里闷着";
+      tone = frictionTone(valenceLift, {
+        deep: "这阵委屈更深了，话更闷，不想顺着哄",
+        full: "觉得刚才那样像被误会了，心里闷着",
+        eased: "那阵委屈松了一档，还闷着，先别回到撒娇",
+      });
       break;
     case "calm":
       break;
@@ -357,6 +396,81 @@ function expressionScores(
       (0.5 + 0.5 * Math.max(cool, ramp(-warmthLift, 0, 0.04))),
     curious: ramp(state.curiosity, 0.32, 0.58) * (1 - 0.85 * sad),
   };
+}
+
+function repair(state: AffectState, nowMs: number): AffectState {
+  const key = frictionKey(state);
+
+  if (!key) return state;
+
+  const lift = state.valence - BASELINE.valence;
+  const place =
+    lift <= -DEEP_VALENCE_LIFT
+      ? CANONICAL_FRICTION[key]
+      : lift <= -EASED_VALENCE_LIFT
+        ? {
+            valence: BASELINE.valence + EASED_LIFT[key].valence,
+            arousal: BASELINE.arousal + EASED_LIFT[key].arousal,
+            warmth: BASELINE.warmth + EASED_LIFT[key].warmth,
+          }
+        : {
+            valence: BASELINE.valence,
+            arousal: BASELINE.arousal,
+            warmth: BASELINE.warmth,
+          };
+
+  // 只沿当前这一种心情退一档，不把烦修成委屈，也不把委屈修成烦。
+  return finish({ ...state, ...place }, nowMs);
+}
+
+function finish(state: AffectState, nowMs: number): AffectState {
+  const draft: AffectState = {
+    ...state,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+
+  draft.expression = deriveExpression(draft, false);
+  draft.cause = freshenCause(draft);
+  return draft;
+}
+
+function holdsFriction(state: AffectState): boolean {
+  return frictionKey(state) !== null;
+}
+
+function frictionKey(state: AffectState): "annoyed" | "wronged" | null {
+  if (state.expression === "annoyed" || state.expression === "wronged") {
+    return state.expression;
+  }
+
+  return null;
+}
+
+function deepensFriction(impulse: AffectImpulse): boolean {
+  return impulse.valence <= -0.1 && impulse.warmth < 0;
+}
+
+function deepenImpulse(
+  state: AffectState,
+  impulse: AffectImpulse,
+): AffectImpulse {
+  if (frictionKey(state) !== "wronged" || impulse.arousal >= 0.2) {
+    return impulse;
+  }
+
+  return {
+    ...impulse,
+    arousal: Math.min(impulse.arousal, DIRECTION_IMPULSE.wronged.arousal),
+  };
+}
+
+function frictionTone(
+  valenceLift: number,
+  lines: { deep: string; full: string; eased: string },
+): string {
+  if (valenceLift <= -DEEP_VALENCE_LIFT) return lines.deep;
+  if (valenceLift <= -EASED_VALENCE_LIFT) return lines.full;
+  return lines.eased;
 }
 
 function freshenCause(state: AffectState): string {

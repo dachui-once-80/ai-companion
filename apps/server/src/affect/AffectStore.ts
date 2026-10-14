@@ -77,6 +77,10 @@ export class AffectStore {
     return this.read().state.cause;
   }
 
+  peekExpression(): CompanionEmotion {
+    return this.read().state.expression;
+  }
+
   private read(): AffectRow {
     const existing = db
       .select()

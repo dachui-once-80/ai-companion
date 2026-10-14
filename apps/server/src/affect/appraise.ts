@@ -2,6 +2,7 @@ import {
   clampImpulse,
   DIRECTION_IMPULSE,
   type AffectRelation,
+  type CompanionEmotion,
   type UtteranceAppraisal,
 } from "./affect";
 
@@ -210,9 +211,55 @@ type Move = {
   relation: AffectRelation;
 };
 
+const REPAIR_CUES = [
+  "我说重了",
+  "说重了",
+  "说得太重",
+  "说太重",
+  "我说得重",
+  "对不起",
+  "抱歉",
+  "不好意思",
+  "我道歉",
+  "是我不好",
+  "我太冲",
+  "太冲了",
+  "我不该那样",
+  "我不该那么",
+  "我收回",
+  "当我没说",
+  "我不是冲你",
+  "不是冲你",
+  "没想凶你",
+  "不是要凶你",
+  "我跟你解释",
+  "听我解释",
+  "我解释一下",
+  "我说明一下",
+  "我说清楚",
+  "我讲清楚",
+  "我跟你说清楚",
+  "我没说清",
+  "没说清楚",
+  "是我没说清",
+  "我太急了",
+  "我刚才太急",
+  "我态度不好",
+  "我语气不好",
+  "我重新说",
+  "我再说清楚",
+  "我重新讲",
+  "听我说完",
+  "是我的错",
+  "我好好说",
+];
+
+const APOLOGY_MARKERS = ["对不起", "抱歉", "不好意思"];
+
 export function appraiseLocally(
   userText: string,
   currentCause: string,
+  expression: CompanionEmotion = "calm",
 ): LocalAppraisal {
   const text = userText.replace(/\s+/g, "").trim();
 
@@ -235,6 +282,19 @@ export function appraiseLocally(
 
   let move: Move;
   let confident = true;
+  const friction = expression === "annoyed" || expression === "wronged";
+
+  if (
+    friction &&
+    repairStrength(text) >= 0.55 &&
+    annoy < 0.55 &&
+    wronged < 0.55
+  ) {
+    return {
+      confident: true,
+      appraisal: { relation: "repair", impulse: EMPTY_IMPULSE },
+    };
+  }
 
   if (annoy >= 0.55) {
     move = directed("annoyed");
@@ -402,6 +462,36 @@ function lexicalMove(text: string): Move | null {
     curiosity: 0.04,
     relation: "shift",
   };
+}
+
+function repairStrength(text: string): number {
+  const bodyCues = REPAIR_CUES.filter(
+    (cue) => !APOLOGY_MARKERS.includes(cue),
+  );
+  let body = cueScore(text, bodyCues);
+
+  if (/我.{0,8}(说清楚|讲清楚|解释|说重|太冲|太急|没说清)/.test(text)) {
+    body = Math.max(body, 0.7);
+  }
+
+  const markerHit = APOLOGY_MARKERS.some((cue) => text.includes(cue));
+
+  if (!markerHit) return body;
+
+  const stripped = text.replace(/对不起|抱歉|不好意思/g, "");
+  const question = body === 0 && looksLikeQuestion(stripped);
+
+  if (question) return 0;
+
+  return Math.min(1, body + 0.7);
+}
+
+function looksLikeQuestion(text: string): boolean {
+  const clause = text.trim();
+
+  if ([...clause].length < 2) return false;
+
+  return isInterrogative(clause);
 }
 
 function annoyStrength(text: string): number {
