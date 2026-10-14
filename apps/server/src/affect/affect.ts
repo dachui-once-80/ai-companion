@@ -2,7 +2,29 @@ export type CompanionEmotion =
   | "calm"
   | "happy"
   | "caring"
-  | "curious";
+  | "curious"
+  | "worried"
+  | "annoyed"
+  | "wronged";
+
+export type MoodDirection =
+  | "neutral"
+  | "happy"
+  | "caring"
+  | "curious"
+  | "worried"
+  | "annoyed"
+  | "wronged";
+
+/** 一句清楚的情绪该把四条轴推到的位置。表情从推完后的状态读出来。 */
+export const DIRECTION_IMPULSE = {
+  happy: { valence: 0.28, arousal: 0.2, warmth: 0.08, curiosity: 0.04 },
+  caring: { valence: -0.2, arousal: 0.08, warmth: 0.12, curiosity: 0.06 },
+  curious: { valence: 0.05, arousal: 0.1, warmth: 0.06, curiosity: 0.55 },
+  worried: { valence: -0.28, arousal: 0.32, warmth: 0.18, curiosity: 0.04 },
+  annoyed: { valence: -0.26, arousal: 0.26, warmth: -0.08, curiosity: 0 },
+  wronged: { valence: -0.26, arousal: 0.02, warmth: -0.06, curiosity: 0 },
+} as const;
 
 export type AffectState = {
   valence: number;
@@ -104,7 +126,7 @@ export function shift(
     ...state,
     valence: clamp(state.valence + impulse.valence, -1, 1),
     arousal: clamp(state.arousal + impulse.arousal, 0, 1),
-    warmth: clamp(state.warmth + impulse.warmth, 0, 1),
+    warmth: applyWarmth(state.warmth, impulse.warmth),
     curiosity: clamp(state.curiosity + impulse.curiosity, 0, 1),
     cause: impulse.cause.trim() || state.cause,
     updatedAt: new Date(nowMs).toISOString(),
@@ -123,7 +145,7 @@ export function retarget(
     ...state,
     valence: clamp(BASELINE.valence + impulse.valence, -1, 1),
     arousal: clamp(BASELINE.arousal + impulse.arousal, 0, 1),
-    warmth: clamp(state.warmth + impulse.warmth, 0, 1),
+    warmth: applyWarmth(state.warmth, impulse.warmth),
     curiosity: clamp(impulse.curiosity, 0, 1),
     cause: impulse.cause.trim(),
     updatedAt: new Date(nowMs).toISOString(),
@@ -201,27 +223,52 @@ export function describeMood(state: AffectState): string {
 
   let tone = "心情接近平时";
 
-  if (valenceLift > 0.18) {
-    tone = "心里还亮着，没完全平下来";
-  } else if (valenceLift > 0.08) {
-    tone = "心情比平时松快一点";
-  } else if (valenceLift < -0.18) {
-    tone = "心里还沉着";
-  } else if (valenceLift < -0.08) {
-    tone = "有一点放心不下";
+  switch (state.expression) {
+    case "happy":
+      tone =
+        valenceLift > 0.18
+          ? "心里还亮着，没完全平下来"
+          : "心情比平时松快一点";
+      break;
+    case "caring":
+      tone = "还有点心疼，想把这件事听完";
+      break;
+    case "curious":
+      tone = "还想把刚才那件事听下去";
+      break;
+    case "worried":
+      tone = "这件事还悬着，有点放心不下";
+      break;
+    case "annoyed":
+      tone = "有点被惹到，话不想接得太顺";
+      break;
+    case "wronged":
+      tone = "觉得刚才那样像被误会了，心里闷着";
+      break;
+    case "calm":
+      break;
   }
 
   const extra: string[] = [];
 
-  if (warmthLift > 0.08) {
+  if (
+    warmthLift > 0.08 &&
+    state.expression !== "caring" &&
+    state.expression !== "worried"
+  ) {
     extra.push("对这个人还留着亲近");
   }
 
-  if (arousalLift > 0.18) {
+  if (
+    arousalLift > 0.18 &&
+    state.expression !== "worried" &&
+    state.expression !== "annoyed" &&
+    state.expression !== "happy"
+  ) {
     extra.push("语气还带着刚才的起伏");
   }
 
-  if (state.curiosity > 0.45) {
+  if (state.curiosity > 0.45 && state.expression !== "curious") {
     extra.push("还想把刚才的话题再听下去");
   }
 
@@ -244,7 +291,10 @@ export function isCompanionEmotion(
     value === "calm" ||
     value === "happy" ||
     value === "caring" ||
-    value === "curious"
+    value === "curious" ||
+    value === "worried" ||
+    value === "annoyed" ||
+    value === "wronged"
   );
 }
 
@@ -255,7 +305,14 @@ function deriveExpression(
   const scores = expressionScores(state);
   let best: CompanionEmotion = "calm";
 
-  for (const emotion of ["happy", "caring", "curious"] as const) {
+  for (const emotion of [
+    "annoyed",
+    "wronged",
+    "worried",
+    "caring",
+    "happy",
+    "curious",
+  ] as const) {
     if (scores[emotion] > scores[best]) {
       best = emotion;
     }
@@ -278,20 +335,27 @@ function expressionScores(
   state: AffectState,
 ): Record<CompanionEmotion, number> {
   const valenceLift = state.valence - BASELINE.valence;
+  const arousalLift = state.arousal - BASELINE.arousal;
   const warmthLift = state.warmth - BASELINE.warmth;
-  const happy = clamp01((valenceLift - 0.06) / 0.2);
-  const caring = Math.max(
-    clamp01((warmthLift - 0.06) / 0.12) *
-      clamp01(0.15 - valenceLift),
-    clamp01((-0.06 - valenceLift) / 0.14),
-  );
-  const curious = clamp01((state.curiosity - 0.28) / 0.4);
+  const sad = ramp(-valenceLift, 0.08, 0.18);
+  const tense = ramp(arousalLift, 0.08, 0.18);
+  const soft = 1 - tense;
+  const near = ramp(warmthLift, 0.04, 0.12);
+  const cool = ramp(-warmthLift, 0.02, 0.06);
 
   return {
-    calm: 0.36,
-    happy,
-    caring,
-    curious,
+    calm: 0.34,
+    happy: ramp(valenceLift, 0.06, 0.2),
+    caring:
+      sad * soft * Math.max(near, ramp(warmthLift, -0.02, 0.06) * 0.85),
+    worried: sad * tense * (1 - cool) * ramp(warmthLift, -0.04, 0.08),
+    annoyed: sad * tense * (1 - near) * cool,
+    wronged:
+      sad *
+      soft *
+      (1 - near) *
+      (0.5 + 0.5 * Math.max(cool, ramp(-warmthLift, 0, 0.04))),
+    curious: ramp(state.curiosity, 0.32, 0.58) * (1 - 0.85 * sad),
   };
 }
 
@@ -329,10 +393,17 @@ function elapsedMs(updatedAt: string, nowMs: number): number {
 
 function clipCause(cause: string): string {
   const trimmed = cause.replace(/[\r\n]+/g, "").trim();
-  const clipped = Array.from(trimmed).slice(0, 24).join("");
+  const chars = Array.from(trimmed);
+  let clipped = chars.slice(0, 24).join("");
+
+  if (chars.length > 24) {
+    const atBreak = clipped.replace(/[，,、][^，,、]*$/, "");
+
+    if ([...atBreak].length >= 8) clipped = atBreak;
+  }
 
   if (
-    /^(calm|happy|caring|curious|开心|平静|好奇|关怀|温柔)$/.test(
+    /^(calm|happy|caring|curious|worried|annoyed|wronged|开心|平静|好奇|关怀|温柔|担心|烦|委屈|心疼)$/.test(
       clipped,
     )
   ) {
@@ -340,6 +411,19 @@ function clipCause(cause: string): string {
   }
 
   return clipped;
+}
+
+function applyWarmth(current: number, delta: number): number {
+  if (delta >= 0) return clamp(current + delta, 0, 1);
+
+  // 亲近堆在平时之上时，往回缩的一句先回到平时再沉一点，烦和委屈才不会被盖住。
+  const base = Math.min(current, BASELINE.warmth);
+  return clamp(base + delta, 0, 1);
+}
+
+function ramp(value: number, start: number, end: number): number {
+  if (end === start) return value >= end ? 1 : 0;
+  return clamp01((value - start) / (end - start));
 }
 
 function clamp(value: number, min: number, max: number): number {

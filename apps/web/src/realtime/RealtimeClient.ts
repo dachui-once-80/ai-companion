@@ -14,7 +14,10 @@ export type CompanionEmotion =
   | "calm"
   | "happy"
   | "caring"
-  | "curious";
+  | "curious"
+  | "worried"
+  | "annoyed"
+  | "wronged";
 
 export type ConnectionState =
   | "idle"
@@ -246,7 +249,10 @@ export function parseCompanionAffect(data: unknown): CompanionAffect | null {
     expression !== "calm" &&
     expression !== "happy" &&
     expression !== "caring" &&
-    expression !== "curious"
+    expression !== "curious" &&
+    expression !== "worried" &&
+    expression !== "annoyed" &&
+    expression !== "wronged"
   ) {
     return null;
   }
@@ -1384,8 +1390,9 @@ ${moodContext}
 
 这是上一段事留下来的心情。
 用户还在聊这件事，或者只是闲聊、问一个事实问题时，让语气带着这点余温。
-用户一旦说起另一件有情绪分量的事，这一句就跟着新的事走。上一件事的开心、心软或好奇留在上一句，不要带进这句。
+用户一旦说起另一件有情绪分量的事，这一句就跟着新的事走。上一件事的开心、心疼、担心、烦、委屈或好奇留在上一句，不要带进这句。
 不要说出情绪名称，不要复述上面这段状态，也不要为了表现心情去堆固定的感叹、安慰或追问。
+放心不下时语气悬一点。被惹到时把句子收短，不要陪着绕。觉得被误会时闷一点，不要反过来哄自己，也不要指责。
 普通问题先把事情说清楚。心情只影响温度，不影响事实，也不改写你是谁。
 
 对话过程中如果出现以「（内部状态」开头的内容，那是心情已经按新的事更新了，不是用户说的话。不要回复它，不要复述它。之后的话用这个语气。

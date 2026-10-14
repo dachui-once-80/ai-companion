@@ -876,8 +876,11 @@ function App() {
 const emotionLabels: Record<CompanionEmotion, string> = {
   calm: "平静",
   happy: "开心",
-  caring: "温柔关怀",
+  caring: "心疼",
   curious: "好奇",
+  worried: "担心",
+  annoyed: "烦",
+  wronged: "委屈",
 };
 
 export default App;

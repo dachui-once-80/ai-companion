@@ -1,8 +1,16 @@
 import {
   clampImpulse,
+  DIRECTION_IMPULSE,
   type AffectRelation,
   type UtteranceAppraisal,
 } from "./affect";
+
+export type LocalAppraisal = {
+  appraisal: UtteranceAppraisal;
+  confident: boolean;
+};
+
+const LONG_SPOKEN = 20;
 
 const EMPTY_IMPULSE = {
   valence: 0,
@@ -46,6 +54,75 @@ const CARE_CUES = [
   "我等你",
   "我帮你",
   "保重",
+  "替你担心",
+  "为你担心",
+];
+
+const ANNOY_CUES = [
+  "你好烦",
+  "好烦你",
+  "你烦不烦",
+  "你真烦",
+  "烦死你",
+  "你很烦",
+  "闭嘴",
+  "少废话",
+  "别烦我",
+  "吵死",
+  "太啰嗦",
+  "好啰嗦",
+  "懒得理你",
+  "有完没完",
+  "有病吧",
+  "神经吧",
+  "滚开",
+  "滚一边",
+  "少来这套",
+  "随便你",
+  "拉倒吧",
+  "打住",
+];
+
+const WRONGED_CUES = [
+  "你想多了",
+  "你想太多",
+  "你误会",
+  "你不在乎我",
+  "你是不是不在乎",
+  "你都不管我",
+  "你根本没听",
+  "你都没在听",
+  "你心里没有我",
+  "你怎么这样对我",
+  "你凭什么",
+  "假好心",
+  "你少装",
+  "你根本不懂我",
+  "你都不懂我",
+  "你把我当",
+  "你冤枉",
+];
+
+const WORRY_CUES = [
+  "害怕",
+  "好怕",
+  "吓死",
+  "吓到",
+  "出事",
+  "受伤",
+  "住院",
+  "发烧",
+  "生病",
+  "病了",
+  "迷路",
+  "危险",
+  "找不到",
+  "丢了",
+  "被骗",
+  "手术",
+  "急救",
+  "心慌",
+  "不安",
 ];
 
 const PUSH_CUES = [
@@ -136,33 +213,49 @@ type Move = {
 export function appraiseLocally(
   userText: string,
   currentCause: string,
-): UtteranceAppraisal {
+): LocalAppraisal {
   const text = userText.replace(/\s+/g, "").trim();
 
   if ([...text].length < 2) {
-    return { relation: "neutral", impulse: EMPTY_IMPULSE };
+    return {
+      confident: true,
+      appraisal: { relation: "neutral", impulse: EMPTY_IMPULSE },
+    };
   }
 
   const clauses = splitClauses(text);
   const lexical = lexicalMove(text);
   const push = pushbackStrength(text);
   const care = careStrength(text);
+  const worry = worryStrength(text);
+  const annoy = annoyStrength(text);
+  const wronged = wrongedStrength(text);
   const story = storyStrength(text, clauses);
   const plainQuestion = isPlainQuestion(clauses);
 
   let move: Move;
+  let confident = true;
 
-  if (plainQuestion && push < 0.55) {
+  if (annoy >= 0.55) {
+    move = directed("annoyed");
+  } else if (wronged >= 0.55) {
+    move = directed("wronged");
+  } else if (worry >= 0.55) {
+    move = directed("worried");
+  } else if (plainQuestion && push < 0.55) {
     if (!lexical) {
       return {
-        relation: "continue",
-        impulse: clampImpulse({
-          valence: 0.02,
-          arousal: 0.02,
-          warmth: 0.01,
-          curiosity: 0.06,
-          cause: "",
-        }),
+        confident: spokenLength(text) < LONG_SPOKEN,
+        appraisal: {
+          relation: "continue",
+          impulse: clampImpulse({
+            valence: 0.02,
+            arousal: 0.02,
+            warmth: 0.01,
+            curiosity: 0.06,
+            cause: "",
+          }),
+        },
       };
     }
 
@@ -175,7 +268,6 @@ export function appraiseLocally(
       move = {
         ...move,
         curiosity: move.curiosity + Math.min(0.28, story * 0.35),
-        arousal: move.arousal + 0.04,
       };
     }
   } else if (push >= 0.55) {
@@ -215,6 +307,7 @@ export function appraiseLocally(
       curiosity: heavy ? 0.36 : 0.52,
       relation: "continue",
     };
+    confident = false;
   } else if (isPassage(text, clauses)) {
     move = {
       valence: 0.2,
@@ -223,6 +316,7 @@ export function appraiseLocally(
       curiosity: 0.16,
       relation: "continue",
     };
+    confident = false;
   } else {
     move = {
       valence: 0.05,
@@ -231,6 +325,7 @@ export function appraiseLocally(
       curiosity: 0.08,
       relation: "continue",
     };
+    confident = false;
   }
 
   if (repeatsCause(text, currentCause)) {
@@ -245,14 +340,39 @@ export function appraiseLocally(
     move.curiosity >= 0.2;
 
   return {
-    relation: move.relation,
-    impulse: clampImpulse({
-      valence: move.valence,
-      arousal: move.arousal,
-      warmth: move.warmth,
-      curiosity: move.curiosity,
-      cause: memorable ? toCause(text) : "",
-    }),
+    confident,
+    appraisal: {
+      relation: move.relation,
+      impulse: clampImpulse({
+        valence: move.valence,
+        arousal: move.arousal,
+        warmth: move.warmth,
+        curiosity: move.curiosity,
+        cause: memorable ? toCause(text) : "",
+      }),
+    },
+  };
+}
+
+export function shouldConsultModel(
+  userText: string,
+  confident: boolean,
+): boolean {
+  if (confident) return false;
+
+  const text = userText.replace(/\s+/g, "").trim();
+  return spokenLength(text) >= LONG_SPOKEN;
+}
+
+function directed(key: "worried" | "annoyed" | "wronged"): Move {
+  const impulse = DIRECTION_IMPULSE[key];
+
+  return {
+    valence: impulse.valence,
+    arousal: impulse.arousal,
+    warmth: impulse.warmth,
+    curiosity: impulse.curiosity,
+    relation: "shift",
   };
 }
 
@@ -282,6 +402,30 @@ function lexicalMove(text: string): Move | null {
     curiosity: 0.04,
     relation: "shift",
   };
+}
+
+function annoyStrength(text: string): number {
+  return Math.min(1, cueScore(text, ANNOY_CUES));
+}
+
+function wrongedStrength(text: string): number {
+  let score = cueScore(text, WRONGED_CUES);
+
+  if (/你[^他她]{0,6}不在乎/.test(text)) score += 0.7;
+  if (/你[^他她]{0,6}不管我/.test(text)) score += 0.7;
+  if (/你[^他她]{0,4}没(在)?听/.test(text)) score += 0.7;
+  if (/你[^他她]{0,4}不懂我/.test(text)) score += 0.7;
+
+  return Math.min(1, score);
+}
+
+function worryStrength(text: string): number {
+  const aboutHer = text.replace(/担心你|替你担心|为你担心/g, "");
+  let score = cueScore(aboutHer, WORRY_CUES);
+
+  if (/我(好|很|特别|有点)?担心/.test(aboutHer)) score += 0.7;
+
+  return Math.min(1, score);
 }
 
 function careStrength(text: string): number {

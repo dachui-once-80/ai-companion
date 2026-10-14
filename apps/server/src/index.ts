@@ -3,7 +3,12 @@ import express from "express";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import { affectStore } from "./affect/AffectStore";
-import { appraiseLocally } from "./affect/appraise";
+import { appraiseLocally, shouldConsultModel } from "./affect/appraise";
+import {
+  affectAppraisalSchema,
+  appraisalPrompt,
+  parseModelAppraisal,
+} from "./affect/appraiseModel";
 import { Companion } from "./companion/Companion";
 import {
   isThoughtKind,
@@ -1194,10 +1199,32 @@ app.post("/api/affect/appraise", async (req, res) => {
   }
 
   try {
-    const appraisal = appraiseLocally(
-      userText,
-      affectStore.peekCause(),
-    );
+    const cause = affectStore.peekCause();
+    const local = appraiseLocally(userText, cause);
+    let appraisal = local.appraisal;
+
+    if (shouldConsultModel(userText, local.confident)) {
+      try {
+        const response = await gemini.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: appraisalPrompt(userText, cause),
+          config: {
+            temperature: 0,
+            abortSignal: AbortSignal.timeout(12_000),
+            responseMimeType: "application/json",
+            responseJsonSchema: affectAppraisalSchema,
+          },
+        });
+        const parsed = parseModelAppraisal(response.text ?? "", userText);
+
+        if (parsed) {
+          appraisal = parsed.appraisal;
+          console.log("[Affect] model toward", parsed.toward);
+        }
+      } catch (error) {
+        console.warn("[Affect] model appraisal skipped:", error);
+      }
+    }
 
     res.json(affectStore.follow(appraisal));
   } catch (error) {

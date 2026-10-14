@@ -313,7 +313,7 @@ input:focus-visible {
   border-radius: 0 0 18px 18px;
 }
 
-/* ---------- 情绪：温柔关怀 ---------- */
+/* ---------- 情绪：心疼 ---------- */
 
 .orb-emotion-caring {
   --emotion-color: #ff9eb5;
@@ -359,6 +359,82 @@ input:focus-visible {
   height: 9px;
   border: 2px solid #51456f;
   border-radius: 50%;
+}
+
+/* ---------- 情绪：担心 ---------- */
+
+.orb-emotion-worried {
+  --emotion-color: #7eb0e8;
+  --emotion-glow: rgba(126, 176, 232, 0.38);
+}
+
+.orb-emotion-worried .orb-aura {
+  opacity: 0.4;
+  transform: scale(1.02);
+}
+
+.orb-emotion-worried .orb-eye {
+  width: 8px;
+  height: 13px;
+}
+
+.orb-emotion-worried .orb-mouth {
+  width: 11px;
+  height: 2px;
+  border: 0;
+  border-radius: 2px;
+  background: #51456f;
+}
+
+/* ---------- 情绪：烦 ---------- */
+
+.orb-emotion-annoyed {
+  --emotion-color: #e0916a;
+  --emotion-glow: rgba(224, 145, 106, 0.36);
+}
+
+.orb-emotion-annoyed .orb-aura {
+  opacity: 0.34;
+  transform: scale(0.96);
+}
+
+.orb-emotion-annoyed .orb-eye {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.orb-emotion-annoyed .orb-mouth {
+  width: 16px;
+  height: 2px;
+  border: 0;
+  border-radius: 2px;
+  background: #51456f;
+}
+
+/* ---------- 情绪：委屈 ---------- */
+
+.orb-emotion-wronged {
+  --emotion-color: #c7a4d4;
+  --emotion-glow: rgba(199, 164, 212, 0.34);
+}
+
+.orb-emotion-wronged .orb-aura {
+  opacity: 0.28;
+  transform: scale(0.94);
+}
+
+.orb-emotion-wronged .orb-eye {
+  width: 7px;
+  height: 6px;
+}
+
+.orb-emotion-wronged .orb-mouth {
+  width: 16px;
+  height: 8px;
+  border-style: solid;
+  border-width: 2px 2px 0;
+  border-radius: 12px 12px 0 0;
 }
 
 /* =========================================
