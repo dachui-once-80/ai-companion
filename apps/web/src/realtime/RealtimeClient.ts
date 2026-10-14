@@ -6,6 +6,15 @@ import {
   type Session,
 } from "@google/genai";
 import { asideLineFor } from "./asides";
+import {
+  decidePresence,
+  floorNote,
+  isBackchannel,
+  presenceGuidance,
+  type Floor,
+  type HeardSpeaker,
+  type PresenceDecision,
+} from "./presence";
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -30,7 +39,8 @@ export type RealtimeMessage =
   | { type: "closed"; reason?: string }
   | { type: "disconnected" }
   | { type: "error"; error: unknown }
-  | { type: "input_transcript"; text: string }
+  | { type: "input_transcript"; text: string; speaker: string }
+  | { type: "presence"; floor: Floor }
   | { type: "output_transcript"; text: string }
   | { type: "turn_complete" }
   | { type: "memory_updated" }
@@ -121,7 +131,7 @@ function residenceCityForWeather(memoryContext: string): string {
 }
 
 type DialogueTurn = {
-  role: "user" | "companion";
+  role: "user" | "companion" | "overheard";
   text: string;
 };
 
@@ -133,12 +143,15 @@ function localDateString(date = new Date()): string {
 }
 
 function dialogueWorthKeeping(batch: DialogueTurn[]): boolean {
-  const userTurns = batch.filter((turn) => turn.role === "user");
-  const userText = userTurns.map((turn) => turn.text).join("");
+  const heard = batch.filter(
+    (turn) => turn.role === "user" || turn.role === "overheard",
+  );
+  const heardText = heard.map((turn) => turn.text).join("");
 
-  if (userText.replace(/\s+/g, "").length < 4) return false;
+  if (heardText.replace(/\s+/g, "").length < 4) return false;
+  if (heard.some((turn) => turn.role === "overheard")) return true;
 
-  return !userTurns.every((turn) => isShortLookup(turn.text));
+  return !heard.every((turn) => isShortLookup(turn.text));
 }
 
 function isShortLookup(text: string): boolean {
@@ -150,6 +163,16 @@ function isShortLookup(text: string): boolean {
   return /天气|气温|温度|下雨|降雨|刮风|风力|几度|冷不冷|热不热/.test(
     compact,
   );
+}
+
+function transcriptSpeaker(
+  decision: PresenceDecision,
+  speaker: HeardSpeaker,
+): string {
+  if (speaker === "other") return "旁边";
+  if (decision.lineRole === "overheard") return "你（对旁边）";
+
+  return "你";
 }
 
 class ConsolidationDeferred extends Error {
@@ -406,6 +429,21 @@ export class RealtimeClient {
   private residenceCity = "";
   private playbackTail: Promise<void> = Promise.resolve();
 
+  // 她现在在不在这段对话里。旁边的人说话时，不把生成的声音放出来。
+  private floor: Floor = "together";
+  private companionNames: string[] = ["阿七"];
+  private primarySpeakerLabel = "";
+  private speakerTotals = new Map<string, number>();
+  private lastOtherSpeakerAt = 0;
+  private lastTurnAt = 0;
+  private withholdSpeech = false;
+  private mutedByPresence = false;
+  private withheldText = "";
+  private lineForCompanion = true;
+  private appraiseThisLine = true;
+  private expectingNudge = false;
+  private pendingFloor: Floor | null = null;
+
   // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
   private playbackTurnSettled = false;
 
@@ -540,6 +578,13 @@ export class RealtimeClient {
 
       const residenceCity = residenceCityForWeather(memoryContext);
       this.residenceCity = residenceCity;
+      this.companionNames = [
+        ...new Set(
+          [identity.currentName, ...identity.previousNames]
+            .map((name) => name.trim())
+            .filter((name) => name.length > 0),
+        ),
+      ];
 
       if (!this.isCurrentConnection(generation)) return;
 
@@ -557,6 +602,9 @@ export class RealtimeClient {
           },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
+          proactivity: {
+            proactiveAudio: true,
+          },
 
           systemInstruction: {
             parts: [
@@ -1262,6 +1310,182 @@ export class RealtimeClient {
     this.injectMood(affect.mood);
   }
 
+  private judge(text: string, speaker: HeardSpeaker): PresenceDecision {
+    return decidePresence({
+      floor: this.floor,
+      text,
+      speaker,
+    names: this.companionNames,
+    otherVoicesRecent:
+      this.lastOtherSpeakerAt > 0 &&
+      Date.now() - this.lastOtherSpeakerAt < 12_000,
+    sidePause:
+      this.floor === "aside" &&
+      this.lastTurnAt > 0 &&
+      Date.now() - this.lastTurnAt > 12_000,
+  });
+  }
+
+  private resolveSpeaker(
+    label: string | undefined,
+    text: string,
+    count: boolean,
+  ): HeardSpeaker {
+    const cleaned = label?.trim() ?? "";
+
+    if (!cleaned) return "unknown";
+
+    if (count) {
+      const total = (this.speakerTotals.get(cleaned) ?? 0) + text.length;
+      this.speakerTotals.set(cleaned, total);
+
+      if (!this.primarySpeakerLabel && total >= 8) {
+        this.primarySpeakerLabel = cleaned;
+      }
+    }
+
+    if (!this.primarySpeakerLabel) return "unknown";
+    if (cleaned === this.primarySpeakerLabel) return "user";
+
+    if (count) this.lastOtherSpeakerAt = Date.now();
+
+    return "other";
+  }
+
+  private previewPresence(
+    text: string,
+    speaker: HeardSpeaker,
+    generation: number,
+  ): void {
+    const decision = this.judge(text, speaker);
+    this.applySpeechGate(decision.speak, generation);
+  }
+
+  private commitPresence(
+    text: string,
+    speaker: HeardSpeaker,
+    generation: number,
+  ): PresenceDecision {
+    const decision = this.judge(text, speaker);
+
+    if (decision.floor !== this.floor) {
+      this.floor = decision.floor;
+      this.pendingFloor = decision.floor;
+      this.emit({ type: "presence", floor: decision.floor });
+      console.log("[Presence]", decision.floor, decision.move);
+    }
+
+    this.lineForCompanion = decision.lineRole === "user";
+    this.appraiseThisLine = decision.appraise;
+
+    if (decision.speak) {
+      this.withheldText = "";
+    } else if (this.currentCompanionText.trim()) {
+      this.withheldText += this.currentCompanionText;
+      this.currentCompanionText = "";
+      this.spokeThisTurn = false;
+    }
+
+    this.applySpeechGate(decision.speak, generation);
+
+    return decision;
+  }
+
+  private applySpeechGate(speak: boolean, generation: number): void {
+    if (speak) {
+      this.withholdSpeech = false;
+
+      if (this.mutedByPresence) {
+        this.discardUnplayedAudio = false;
+        this.mutedByPresence = false;
+      }
+
+      return;
+    }
+
+    this.withholdSpeech = true;
+    this.silencePlayback(generation);
+  }
+
+  private silencePlayback(generation: number): void {
+    if (!this.isPlaybackActive()) return;
+
+    this.mutedByPresence = true;
+    this.clearPlayback(generation, true);
+  }
+
+  private notePresence(generation: number): void {
+    if (!this.isCurrentConnection(generation)) return;
+
+    this.sendPresenceNote(this.presenceNote(), false);
+  }
+
+  private nudgeReply(userText: string): void {
+    const clip = userText.replace(/\s+/g, "").slice(0, 40);
+    const sent = this.sendPresenceNote(
+      `${this.presenceNote()}用户上一句是对你说的：「${clip}」。你还没出声。现在用你自己的口气接这一句。`,
+      true,
+    );
+
+    this.expectingNudge = sent;
+  }
+
+  private presenceNote(): string {
+    const lines: string[] = [];
+
+    if (this.pendingFloor) {
+      lines.push(
+        floorNote(this.pendingFloor, this.companionNames[0] ?? "阿七"),
+      );
+      this.pendingFloor = null;
+    }
+
+    const unspoken = this.withheldText.trim();
+    this.withheldText = "";
+
+    if (unspoken) {
+      lines.push(
+        `你刚才组织过一句没说出口的话：「${unspoken.slice(0, 80)}」。就当没说过。`,
+      );
+    }
+
+    return lines.join("");
+  }
+
+  private sendPresenceNote(body: string, cueReply: boolean): boolean {
+    const text = body.trim();
+
+    if (!text) return false;
+
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return false;
+
+    const cue = cueReply
+      ? "不要复述这段提醒。"
+      : "不要复述，也不要因此开口。";
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: `（内部状态，不是用户说的话，${cue}）${text}`,
+              },
+            ],
+          },
+        ],
+        turnComplete: cueReply,
+      });
+      return true;
+    } catch (error) {
+      console.warn("[Presence] failed to update the session:", error);
+      return false;
+    }
+  }
+
   private injectMood(mood: string): void {
     if (mood === this.lastInjectedMood) return;
 
@@ -1401,6 +1625,8 @@ ${moodContext}
 - 不要每次回复都机械追问、重复安慰句式或夸奖。
 - 不要每次都用“我一直都在”“抱抱你”等相同句式。
 - 不要为了维持积极气氛而忽略用户真正的问题。
+
+${presenceGuidance(identity.currentName, identity.previousNames)}
 
 ## 查资料时的接话
 get_weather、web_search、recall_memory 的结果不会马上回来。
@@ -1638,6 +1864,15 @@ scope 规则：
       interimTranscript.length > 0
     ) {
       this.openUserTurn();
+      this.previewPresence(
+        interimTranscript,
+        this.resolveSpeaker(
+          content.interimInputTranscription?.speakerLabel,
+          interimTranscript,
+          false,
+        ),
+        generation,
+      );
       // 临时转写比最终转写更早，用来在她出声时立刻停播。
       this.bargeInFromUser(generation);
     }
@@ -1648,11 +1883,28 @@ scope 规则：
     ) {
       this.openUserTurn();
       this.currentUserText += inputTranscript;
-      this.scheduleUserAppraisal(generation);
+      const speaker = this.resolveSpeaker(
+        content.inputTranscription?.speakerLabel,
+        inputTranscript,
+        true,
+      );
+      const decision = this.commitPresence(
+        this.currentUserText,
+        speaker,
+        generation,
+      );
+
+      if (this.appraiseThisLine) {
+        this.scheduleUserAppraisal(generation);
+      } else if (this.userAppraisalTimer !== null) {
+        window.clearTimeout(this.userAppraisalTimer);
+        this.userAppraisalTimer = null;
+      }
 
       this.emit({
         type: "input_transcript",
         text: inputTranscript,
+        speaker: transcriptSpeaker(decision, speaker),
       });
 
       // 她还在出声时用户已经开口，立刻停播。
@@ -1671,17 +1923,21 @@ scope 规则：
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
-      this.markCompanionSpoke();
-      this.currentCompanionText += outputTranscript;
+      if (this.withholdSpeech) {
+        this.withheldText += outputTranscript;
+      } else {
+        this.markCompanionSpoke();
+        this.currentCompanionText += outputTranscript;
 
-      if (this.awaitingCompanionText) {
-        this.armCompanionCapture(generation);
+        if (this.awaitingCompanionText) {
+          this.armCompanionCapture(generation);
+        }
+
+        this.emit({
+          type: "output_transcript",
+          text: outputTranscript,
+        });
       }
-
-      this.emit({
-        type: "output_transcript",
-        text: outputTranscript,
-      });
     }
 
 
@@ -1693,14 +1949,16 @@ scope 规则：
         return typeof data === "string" && data.length > 0;
       });
 
-      if (hasAudio && !this.discardUnplayedAudio) {
+      if (hasAudio && this.withholdSpeech) {
+        this.silencePlayback(generation);
+      } else if (hasAudio && !this.discardUnplayedAudio) {
         this.markCompanionSpoke();
         this.playbackTurnSettled = false;
       }
 
       for (const part of parts) {
         if (!this.isCurrentConnection(generation)) return;
-        if (this.discardUnplayedAudio) continue;
+        if (this.discardUnplayedAudio || this.withholdSpeech) continue;
 
         const data = part.inlineData?.data;
 
@@ -1732,16 +1990,39 @@ scope 规则：
     const userText = this.currentUserText.trim();
     this.currentUserText = "";
 
-    if (userText.length >= 2) {
+    if (this.appraiseThisLine && userText.length >= 2) {
       void this.appraiseTurn(userText, generation);
     }
 
-    this.pushDialogue("user", userText);
+    this.pushDialogue(
+      this.lineForCompanion ? "user" : "overheard",
+      userText,
+    );
     this.awaitingCompanionText = true;
     this.companionCaptureStartedAt = Date.now();
     this.armCompanionCapture(generation);
 
     this.lastAppraisedUserText = "";
+    this.lastTurnAt = Date.now();
+
+    const shouldNudge =
+      !this.expectingNudge &&
+      this.floor === "together" &&
+      this.lineForCompanion &&
+      this.appraiseThisLine &&
+      !this.withholdSpeech &&
+      !this.spokeThisTurn &&
+      this.toolsInFlight === 0 &&
+      userText.length >= 2 &&
+      !isBackchannel(userText);
+
+    this.expectingNudge = false;
+
+    if (shouldNudge) {
+      this.nudgeReply(userText);
+    } else {
+      this.notePresence(generation);
+    }
 
     this.turnCompletePending = true;
     this.finishTurnIfReady(generation);
@@ -2298,6 +2579,10 @@ scope 规则：
     this.asidePlays = 0;
     this.suppressAsideFollowUp = false;
     this.resultAudioQueued = false;
+    this.lineForCompanion =
+      this.floor === "together" || this.floor === "joined";
+    this.appraiseThisLine = this.floor === "together";
+    this.withholdSpeech = this.floor === "aside" || this.floor === "holding";
   }
 
   private markCompanionSpoke(): void {
@@ -2326,7 +2611,7 @@ scope 规则：
 
   // 她还没开口时垫一句，然后马上把工具结果交回去。
   private armAside(generation: number, toolName: string): Promise<void> {
-    if (this.spokeThisTurn || this.asidePlays > 0) {
+    if (this.withholdSpeech || this.spokeThisTurn || this.asidePlays > 0) {
       if (this.spokeThisTurn) {
         console.log("[Aside] 她已经接过话，不再叠一句");
       }
@@ -2347,6 +2632,7 @@ scope 规则：
         if (
           !this.isCurrentConnection(generation) ||
           this.spokeThisTurn ||
+          this.withholdSpeech ||
           this.discardUnplayedAudio
         ) {
           if (this.spokeThisTurn) {
@@ -2369,6 +2655,7 @@ scope 规则：
     if (
       !this.isCurrentConnection(generation) ||
       this.spokeThisTurn ||
+      this.withholdSpeech ||
       this.suppressAsideFollowUp ||
       this.discardUnplayedAudio ||
       this.asidePlays >= 1 ||
@@ -2789,7 +3076,8 @@ scope 规则：
     if (
       !context ||
       !this.isCurrentConnection(generation) ||
-      this.discardUnplayedAudio
+      this.discardUnplayedAudio ||
+      this.withholdSpeech
     ) {
       return false;
     }
@@ -2807,6 +3095,7 @@ scope 规则：
       !this.isCurrentConnection(generation) ||
       playbackGeneration !== this.playbackGeneration ||
       this.discardUnplayedAudio ||
+      this.withholdSpeech ||
       context !== this.outputContext ||
       (options?.aside &&
         (this.spokeThisTurn ||
@@ -2944,6 +3233,19 @@ scope 规则：
     this.suppressAsideFollowUp = false;
     this.resultAudioQueued = false;
     this.residenceCity = "";
+    this.floor = "together";
+    this.companionNames = ["阿七"];
+    this.primarySpeakerLabel = "";
+    this.speakerTotals.clear();
+    this.lastOtherSpeakerAt = 0;
+    this.lastTurnAt = 0;
+    this.withholdSpeech = false;
+    this.mutedByPresence = false;
+    this.withheldText = "";
+    this.lineForCompanion = true;
+    this.appraiseThisLine = true;
+    this.expectingNudge = false;
+    this.pendingFloor = null;
     this.playbackTail = Promise.resolve();
     this.asideSources.clear();
     this.currentUserText = "";

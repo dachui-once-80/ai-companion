@@ -732,13 +732,32 @@ input:focus-visible {
   font-size: 11px;
 }
 
-.transcript-box p {
-  margin: 12px 0 0;
+.transcript-box p,
+.transcript-line {
+  margin: 8px 0 0;
   color: #d0cadc;
   font-size: 13px;
-  line-height: 1.8;
+  line-height: 1.7;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.transcript-log {
+  max-height: 168px;
+  overflow: auto;
+}
+
+.transcript-line span {
+  color: #8f87a8;
+}
+
+.presence-aside,
+.presence-holding {
+  color: #d7c4a1;
+}
+
+.presence-joined {
+  color: #9ecfb6;
 }
 
 /* ---------- 按钮 ---------- */

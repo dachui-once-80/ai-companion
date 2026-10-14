@@ -16,7 +16,7 @@ import {
 export class ConsolidationInputError extends Error {}
 
 export type DialogueTurn = {
-  role: "user" | "companion";
+  role: "user" | "companion" | "overheard";
   text: string;
 };
 
@@ -159,7 +159,7 @@ export function readConsolidationRequest(body: unknown): {
 
     const turn = item as Record<string, unknown>;
 
-    if (turn.role !== "user" && turn.role !== "companion") {
+    if (turn.role !== "user" && turn.role !== "companion" && turn.role !== "overheard") {
       throw new ConsolidationInputError("Invalid turn role");
     }
 
@@ -180,7 +180,7 @@ export function readConsolidationRequest(body: unknown): {
     turns.push({ role: turn.role, text });
   }
 
-  if (!turns.some((turn) => turn.role === "user")) {
+  if (!turns.some((turn) => turn.role === "user" || turn.role === "overheard")) {
     throw new ConsolidationInputError("A user turn is required");
   }
 
@@ -371,12 +371,12 @@ export async function consolidateConversation(options: {
   body: unknown;
 }): Promise<ConsolidationResult> {
   const { today, turns } = readConsolidationRequest(options.body);
-  const userText = turns
-    .filter((turn) => turn.role === "user")
+  const heardText = turns
+    .filter((turn) => turn.role === "user" || turn.role === "overheard")
     .map((turn) => turn.text)
     .join("");
 
-  if (userText.replace(/\s+/g, "").length < 4 || isDisposableLookup(turns)) {
+  if (heardText.replace(/\s+/g, "").length < 4 || isDisposableLookup(turns)) {
     return emptyResult();
   }
 
@@ -393,6 +393,13 @@ export async function consolidateConversation(options: {
   return applyConsolidation(options.memory, options.thoughts, plan);
 }
 
+function turnLabel(role: DialogueTurn["role"]): string {
+  if (role === "companion") return "阿七";
+  if (role === "overheard") return "现场";
+
+  return "用户";
+}
+
 function buildPrompt(
   today: string,
   known: string,
@@ -400,7 +407,7 @@ function buildPrompt(
   turns: DialogueTurn[],
 ): string {
   const transcript = turns
-    .map((turn) => `${turn.role === "user" ? "用户" : "阿七"}：${turn.text}`)
+    .map((turn) => `${turnLabel(turn.role)}：${turn.text}`)
     .join("\n");
 
   const keys = listMemoryKeys()
@@ -422,6 +429,8 @@ ${views}
 
 这段对话：
 ${transcript}
+
+「现场」不是用户在跟阿七说话。那是他转头跟别人说的，或旁边的人说的。不要把这些写成用户的档案、偏好或决定。值得留的话，写成当时身边发生的事，不要写成用户对阿七的倾诉。用户自己对阿七说的，才按原来的规则整理。
 
 只输出 JSON。六个字段都要在，可以是空数组。
 
@@ -462,6 +471,8 @@ importance 只用 low、medium、high。会反复影响以后怎么陪用户的�
 }
 
 function isDisposableLookup(turns: DialogueTurn[]): boolean {
+  if (turns.some((turn) => turn.role === "overheard")) return false;
+
   const userTurns = turns.filter((turn) => turn.role === "user");
 
   if (userTurns.length === 0) return true;

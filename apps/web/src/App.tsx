@@ -6,8 +6,15 @@ import {
   type ConnectionState,
   type CompanionEmotion,
 } from "./realtime/RealtimeClient";
+import type { Floor } from "./realtime/presence";
 
 import "./App.css";
+
+type TranscriptLine = {
+  id: number;
+  speaker: string;
+  text: string;
+};
 
 type VisualState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -84,12 +91,15 @@ function formatDate(value: string) {
 
 function App() {
   const clientRef = useRef<RealtimeClient | null>(null);
-  const transcriptRef = useRef("");
+  const linesRef = useRef<TranscriptLine[]>([]);
+  const lineIdRef = useRef(0);
   const visualStateRef = useRef<VisualState>("idle");
   const holdListeningRef = useRef(false);
+  const presenceRef = useRef<Floor>("together");
 
   const [state, setState] = useState<ConnectionState>("idle");
-  const [transcript, setTranscript] = useState("");
+  const [lines, setLines] = useState<TranscriptLine[]>([]);
+  const [presence, setPresence] = useState<Floor>("together");
   const [emotion, setEmotion] = useState<CompanionEmotion>("calm");
   const [moodCause, setMoodCause] = useState("");
   const affectEpoch = useRef(0);
@@ -104,6 +114,26 @@ function App() {
   >("current");
   const [notice, setNotice] = useState("");
   const notifiedReminderIds = useRef<Set<string>>(new Set());
+
+  const appendLine = useCallback((speaker: string, text: string) => {
+    const previous = linesRef.current;
+    const last = previous[previous.length - 1];
+    const next =
+      last && last.speaker === speaker
+        ? [...previous.slice(0, -1), { ...last, text: last.text + text }]
+        : [
+            ...previous,
+            { id: ++lineIdRef.current, speaker, text },
+          ].slice(-8);
+
+    linesRef.current = next;
+    setLines(next);
+  }, []);
+
+  const clearLines = useCallback(() => {
+    linesRef.current = [];
+    setLines([]);
+  }, []);
 
   const updateVisualState = useCallback((next: VisualState) => {
     visualStateRef.current = next;
@@ -284,8 +314,9 @@ function App() {
     const client = new RealtimeClient();
     try {
       setState("connecting");
-      setTranscript("");
-      transcriptRef.current = "";
+      clearLines();
+      presenceRef.current = "together";
+      setPresence("together");
 
       updateVisualState("idle");
 
@@ -310,23 +341,19 @@ function App() {
           console.log("[Emotion] changed to:", message.emotion, message.cause);
         }
 
-        // 累计同一说话者的转录片段。
+        if (message.type === "presence") {
+          presenceRef.current = message.floor;
+          setPresence(message.floor);
+        }
+
         if (
           message.type === "input_transcript" ||
           message.type === "output_transcript"
         ) {
           const speaker =
-            message.type === "input_transcript" ? "你" : "阿七";
+            message.type === "input_transcript" ? message.speaker : "阿七";
 
-          const prefix = `${speaker}：`;
-          const previous = transcriptRef.current;
-
-          const next = previous.startsWith(prefix)
-            ? previous + message.text
-            : prefix + message.text;
-
-          transcriptRef.current = next;
-          setTranscript(next);
+          appendLine(speaker, message.text);
         }
 
         if (message.type === "connected") {
@@ -345,9 +372,12 @@ function App() {
         }
 
         if (message.type === "input_transcript") {
-          // 插话之后继续听用户说完；平时则进入思考。
+          const quiet =
+            presenceRef.current === "aside" ||
+            presenceRef.current === "holding";
+
           updateVisualState(
-            holdListeningRef.current ? "listening" : "thinking",
+            quiet || holdListeningRef.current ? "listening" : "thinking",
           );
         }
 
@@ -433,8 +463,9 @@ function App() {
     client?.disconnect();
 
     setState("idle");
-    setTranscript("");
-    transcriptRef.current = "";
+    clearLines();
+    presenceRef.current = "together";
+    setPresence("together");
 
     setEmotion("calm");
     updateVisualState("idle");
@@ -632,6 +663,12 @@ function App() {
             当前状态：{visualStateLabels[visualState]}
           </p>
 
+          {isConnected && (
+            <p className={`emotion-status presence-${presence}`}>
+              {presenceLabels[presence]}
+            </p>
+          )}
+
           <div className={`connection-pill status-${state}`}>
             <span className="status-dot" />
             {state === "idle" && "还没醒呢"}
@@ -642,7 +679,18 @@ function App() {
 
           <div className="transcript-box">
             <span className="transcript-label">最近的对话</span>
-            <p>{transcript || "呼叫阿七，开始你们的对话吧。"}</p>
+            {lines.length === 0 ? (
+              <p className="transcript-line">呼叫阿七，开始你们的对话吧。</p>
+            ) : (
+              <div className="transcript-log">
+                {lines.map((line) => (
+                  <p className="transcript-line" key={line.id}>
+                    <span>{line.speaker}：</span>
+                    {line.text}
+                  </p>
+                ))}
+              </div>
+            )}
           </div>
 
           {state === "idle" || state === "error" ? (
@@ -872,6 +920,13 @@ function App() {
     </main>
   );
 }
+
+const presenceLabels: Record<Floor, string> = {
+  together: "在跟你聊",
+  aside: "听你们说，先不插嘴",
+  holding: "你让我先安静",
+  joined: "加入你们了",
+};
 
 const emotionLabels: Record<CompanionEmotion, string> = {
   calm: "平静",
