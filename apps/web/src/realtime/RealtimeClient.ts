@@ -428,6 +428,20 @@ function readLastSeenAt(data: object): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readReunionCue(data: unknown): string {
+  if (typeof data !== "object" || data === null || !("opening" in data)) {
+    return "";
+  }
+
+  const opening = data.opening;
+
+  if (typeof opening !== "object" || opening === null) return "";
+  if (!("apart" in opening) || opening.apart !== true) return "";
+  if (!("cue" in opening) || typeof opening.cue !== "string") return "";
+
+  return opening.cue.trim();
+}
+
 function readCloseness(data: unknown): string {
   if (
     typeof data === "object" &&
@@ -606,6 +620,10 @@ export class RealtimeClient {
   private expectingNudge = false;
   private pendingFloor: Floor | null = null;
 
+  // 隔了三个小时以上才有。对方还没开口时，用这一则让她先说一句。
+  private reunionCue = "";
+  private reunionCued = false;
+
   // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
   private playbackTurnSettled = false;
 
@@ -748,6 +766,8 @@ export class RealtimeClient {
         moodContext = affectResult.mood;
         lastSeenAt = affectResult.lastSeenAt;
         closenessContext = affectResult.closeness;
+        this.reunionCue = affectResult.openingCue;
+        this.reunionCued = false;
       }
 
       this.heldViews = thoughtResult?.viewItems ?? [];
@@ -1061,6 +1081,7 @@ export class RealtimeClient {
             this.socketConnected = true;
             console.log("[Gemini] WebSocket connected");
             this.emit({ type: "connected" });
+            this.cueReunion(generation);
           },
 
           onmessage: (message: LiveServerMessage) => {
@@ -1114,6 +1135,7 @@ export class RealtimeClient {
       }
 
       this.session = session;
+      this.cueReunion(generation);
 
       await this.startMicrophone(generation);
 
@@ -1573,6 +1595,7 @@ export class RealtimeClient {
     mood: string;
     lastSeenAt: string | null;
     closeness: string;
+    openingCue: string;
   } | null> {
     try {
       const response = await fetch("/api/affect/resume", { method: "POST" });
@@ -1596,6 +1619,7 @@ export class RealtimeClient {
         mood: affect.mood,
         lastSeenAt: affect.lastSeenAt,
         closeness: readCloseness(data),
+        openingCue: readReunionCue(data),
       };
     } catch (error) {
       console.warn("[Affect] resume failed:", error);
@@ -1833,6 +1857,18 @@ export class RealtimeClient {
     this.sendPresenceNote(this.presenceNote(), false);
   }
 
+  private cueReunion(generation: number): void {
+    if (this.reunionCued || !this.reunionCue.trim()) return;
+    if (!this.isCurrentConnection(generation)) return;
+    if (this.currentUserText.trim()) return;
+    if (this.currentCompanionText.trim()) return;
+    if (this.pendingDialogue.length > 0) return;
+
+    const sent = this.sendPresenceNote(this.reunionCue, true);
+
+    if (sent) this.reunionCued = true;
+  }
+
   private nudgeReply(userText: string): void {
     const clip = userText.replace(/\s+/g, "").slice(0, 40);
     const sent = this.sendPresenceNote(
@@ -2008,9 +2044,11 @@ ${closenessContext}
 ## 时间
 ${timeContext}
 
-隔了几个小时以上再见面，第一句可以带上这段空档，但只接上次没说完的事，或轻轻打个招呼。要不要先把旧事说出来，按你们现在的远近。不要汇报你这两天做了什么。
-不到几个小时，就不要在第一句提分开了多久。
-不要编你睡过、吃过，或度过了怎样的一天。这段空档不是你的经历。
+隔了三个小时以上再连上，对方还没开口时，先别出声，等一则先开口的提醒。提醒到了就说一句很短的开场，最多两句。只打招呼，或只接提醒里点名的那一件真实旧事。没有点名就只打招呼，不翻旧事。
+刚认识只打招呼。常聊只轻轻接一件和最近有关的。很熟可以先提一件还悬着的。
+不要汇报你这段时间做了什么。不要编你睡过、吃过，或度过了怎样的一天。这段空档不是你的经历。
+不到三个小时，不要为了重逢先开口，也不要在第一句提分开了多久。
+分开了多久不是要讲的事。又见面了不是一件要讲的事。
 很晚或一大清早，把句子收短，语气跟着钟点。人设不变。不要因此编你睡没睡、起没起。
 用户问昨天、前几天时，按记忆里的日期对。对不上就说不记得。
 隔了三个小时带来的心情变化只负责语气温度，不负责开口内容。
@@ -2136,7 +2174,8 @@ ${unresolvedContext}
 ${questionContext}
 
 相关话题出现时，用对应的那一条接。不要把这几条连着念出来。
-重逢后要不要先提一条还悬着的事，按你们现在的远近。刚认识不要为了这条主动开口。常聊等对方聊到相关的事再接。很熟才可以先提其中一件。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
+隔了三个小时以上、对方还没开口时，按「时间」里那则提醒先说一句。提醒里点了哪一件，就只接那一件。
+聊起来之后，刚认识不要为了旧事主动开口。常聊等对方聊到相关的事再接。很熟可以再提一件还悬着的。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
 不要编你的身体或私人生活。价值观、说话习惯、在意的事、会坚持的看法和内心都不变。
 
 ## 长期记忆总原则
@@ -3827,6 +3866,8 @@ scope 规则：
     this.appraiseThisLine = true;
     this.expectingNudge = false;
     this.pendingFloor = null;
+    this.reunionCue = "";
+    this.reunionCued = false;
     this.playbackTail = Promise.resolve();
     this.asideSources.clear();
     this.currentUserText = "";

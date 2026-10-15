@@ -10,6 +10,7 @@ import {
   parseModelAppraisal,
 } from "./affect/appraiseModel";
 import { resolveCloseness } from "./companion/closeness";
+import { buildReunionOpening } from "./companion/reunion";
 import { Companion } from "./companion/Companion";
 import { holdSessionView } from "./companion/sessionView";
 import {
@@ -1229,8 +1230,19 @@ app.post("/api/affect/resume", (_req, res) => {
       memories: memoryStore.getAll(),
     });
 
+    const opening = buildReunionOpening({
+      nowMs: Date.now(),
+      lastSeenAt: affect.lastSeenAt,
+      tier: closeness.tier,
+      unresolved: thoughtStore.list("unresolved"),
+      questions: thoughtStore.list("question"),
+      promises: memoryManager.listPromises(),
+      dates: memoryManager.listImportantDates(),
+    });
+
     console.log("[Closeness]", closeness.tier);
-    res.json({ ...affect, closeness: closeness.text });
+    console.log("[Reunion]", opening.apart, opening.matter ?? "(greet)");
+    res.json({ ...affect, closeness: closeness.text, opening });
   } catch (error) {
     console.error("[Affect] resume failed:", error);
     res.status(500).json({ error: "Failed to resume affect" });

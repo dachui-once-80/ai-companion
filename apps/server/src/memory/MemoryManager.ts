@@ -138,6 +138,17 @@ export class MemoryManager {
             .filter((item): item is ReadableDate => item !== null);
     }
 
+    /** 还没做完的约定。开场只从这里面挑，不把笑话和相处方式算进去。 */
+    listPromises(): Array<{ about: string; content: string; updatedAt: string }> {
+        return this.currentBetween()
+            .filter((item) => item.kind === "promise")
+            .map((item) => ({
+                about: item.about,
+                content: item.content,
+                updatedAt: item.updatedAt,
+            }));
+    }
+
     getAll() {
         return this.store.getAll();
     }
