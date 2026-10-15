@@ -14,6 +14,12 @@ import {
 } from "./between";
 import type { MemoryManager } from "./MemoryManager";
 import { getMemoryCategory, isValidMemoryKey, listMemoryKeys } from "./MemoryPolicy";
+import {
+  describesWhenSad,
+  explicitWhenSad,
+  isUnstatedProfile,
+  normalizeImportantDate,
+} from "./profileFacts";
 import type { MemoryImportance } from "./MemoryTypes";
 import {
   formatLocalDate,
@@ -339,8 +345,15 @@ export function parseConsolidationResult(
 
   for (const item of asObjects(record.profile).slice(0, MAX_ITEMS)) {
     const key = (readString(item.key) ?? "").trim();
-    const content = readContent(item.content);
+    let content = readContent(item.content);
     if (!key || !content || !isValidMemoryKey(key)) continue;
+    if (isUnstatedProfile(content)) continue;
+
+    if (key === "important_date") {
+      const normalized = normalizeImportantDate(content);
+      if (!normalized) continue;
+      content = normalized;
+    }
 
     profile.push({
       key,
@@ -356,6 +369,9 @@ export function parseConsolidationResult(
 
     if (!isBetweenKind(kind) || !about || !content) continue;
     if (rejectedBetween(about, content)) continue;
+    if ((kind === "hold" || kind === "listen") && describesWhenSad(content)) {
+      continue;
+    }
 
     betweenByKey.set(`${kind}:${subjectKey(about)}`, {
       kind,
@@ -369,6 +385,14 @@ export function parseConsolidationResult(
 
   for (const note of notes) {
     const lifted = classifyBetweenNote(note.content);
+
+    if (
+      lifted &&
+      (lifted.kind === "hold" || lifted.kind === "listen") &&
+      describesWhenSad(note.content)
+    ) {
+      continue;
+    }
 
     if (lifted && !rejectedBetween(lifted.about, note.content)) {
       const key = `${lifted.kind}:${subjectKey(lifted.about)}`;
@@ -513,6 +537,17 @@ export function applyConsolidation(
   }
 
   for (const item of plan.profile) {
+    if (
+      item.key === "user_name" &&
+      plan.profile.some(
+        (other) =>
+          other.key === "preferred_address" &&
+          blocksProfileName(item.content, other.content),
+      )
+    ) {
+      continue;
+    }
+
     if (overlapsBetween(item.content, plan.between, item.key)) continue;
 
     const result = memory.remember({
@@ -617,8 +652,69 @@ export async function consolidateConversation(options: {
     ),
   );
   const plan = parseConsolidationResult(raw, today);
+  keepStatedWhenSad(plan, turns);
 
   return applyConsolidation(options.memory, options.thoughts, plan);
+}
+
+function keepStatedWhenSad(
+  plan: ConsolidationPlan,
+  turns: DialogueTurn[],
+): void {
+  const stance = statedWhenSad(turns);
+
+  if (stance === "no") {
+    plan.profile = plan.profile.filter((item) => item.key !== "when_sad");
+    return;
+  }
+
+  if (stance !== "explicit") return;
+  if (plan.profile.some((item) => item.key === "when_sad")) return;
+
+  const said = turns
+    .filter((turn) => turn.role === "user")
+    .map((turn) => explicitWhenSad(turn.text))
+    .find((item): item is string => item !== null);
+
+  if (!said) return;
+
+  plan.profile.push({
+    key: "when_sad",
+    content: said,
+    importance: "high",
+  });
+}
+
+function statedWhenSad(
+  turns: DialogueTurn[],
+): "explicit" | "mentioned" | "no" {
+  let mentioned = false;
+
+  for (const turn of turns) {
+    if (turn.role !== "user") continue;
+    if (explicitWhenSad(turn.text)) return "explicit";
+
+    const compact = turn.text.replace(/\s+/g, "");
+
+    if (isUnstatedProfile(compact)) continue;
+    if (
+      /(?:朋友|同事|同学|别人|他人|他说|她说)/.test(compact) &&
+      !/我(?:自己)?(?:很|特别|有点|比较|真|挺)?(?:难过|伤心|难受|心情不好)/.test(
+        compact,
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      /(?:难过|伤心|难受|心情不好)/.test(compact) &&
+      /(?:建议|被听|办法|听我说)/.test(compact)
+    ) {
+      mentioned = true;
+    }
+  }
+
+  return mentioned ? "mentioned" : "no";
 }
 
 function turnLabel(role: DialogueTurn["role"]): string {
@@ -679,35 +775,42 @@ episodes：聊过的具体事情。以后用户问「昨天发生了什么」「
 - date 用 YYYY-MM-DD。说的是今天的事就用 ${today}。说的是昨天或更早，按今天推算。推不出就用 ${today}。
 - 问候、天气闲聊、复读，不要写。
 - 不要和已有片段重复。
-- 怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的、不能先给建议，不要写进片段。那些写进 between。
+- 平时怎么称呼、难过时想被听还是想要办法、作息、正在做的事、不想被碰的话题、在意的日子，不要写进片段。那些写进 profile。彼此的笑话、某一类事要先听完、答应了还没做的、某一件事不能先给建议，写进 between。
 
 impressions：她对用户近况的判断，不是用户填的档案。例如「用户最近一直在加班，压力不小」。
 - theme 用简短中文。同一件事沿用已有判断里的 theme，例如「加班」「压力」「睡眠」。
 - content 用她注意到的口气，一句，称呼用「用户」。这是她的感觉，不要写成用户确认过的事实。
 - 近况没变就不要再输出。变了就输出新的 content，同一 theme 的旧判断会被换掉。
 - 没有依据不要推断。
-- 怎么称呼、先听完、不能先给建议、笑话和还没做的约定，不要写成对近况的判断。
+- 怎么称呼、难过时想怎样被陪、作息、正在做的事、不想被碰的话题、在意的日子、笑话和还没做的约定，不要写成对近况的判断。
 
 retireImpressions：已有判断明显不再成立时，写下要收回的 theme。没有就空数组。
 
 notes：整段话里值得以后再提起，但不是某一天的事件，也不是对近况的判断，也对不上下面的档案字段，也不是你们怎么相处。例如一个决定、一件还没发生但用户放在心上的事。
 - label 用简短中文。
 - 不要和档案、片段、判断重复。
-- 怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的、不能先给建议，不要写进 notes。那些只写 between。
+- 平时怎么称呼、难过时想被听还是想要办法、作息、正在做的事、不想被碰的话题、在意的日子，不要写进 notes。那些写 profile。彼此的笑话、某一类事要先听完、答应了还没做的、某一件事不能先给建议，只写 between。
 
 profile：只有用户在这段话里明确说出的稳定事实，而且 key 必须是下面之一。
 ${keys}
 - 没说出口的不要推断。假设、玩笑、转述别人、没说完的，不要写。
 - 和已有档案相同就不要写。没有把握就不要写。写错会盖掉旧的单值档案。
-- 用户规定你们怎么叫，不要写成 user_name。user_name 只在用户说出自己的姓名时写，例如「我叫张三」。
+- user_name 只在用户说出自己的姓名时写，例如「我叫张三」。用户规定平时怎么称呼，写 preferred_address，不要写成 user_name。
+- when_sad：用户明确说自己难过、伤心或难受时，想先被听还是想要办法。例如「我难过时先别给建议」写成「难过时先别给建议」。单值。不要写成 between 的 listen 或 hold。
+- preferred_address：平时怎么称呼他。单值。例如「叫我阿远」。
+- daily_routine：大致作息，写成一句当前的描述。单值。用户更正时写新的一句。
+- current_activity：用户说自己正在做的事。可多条。不是某一天的片段，也不是长期目标。
+- avoid_topic：用户明确说不想被提起的话题。可多条。
+- important_date：生日以外在意的日子，例如考试、纪念日。可多条。生日写 birthday，不要写这里。content 必须能读出日期：用户说了年月日就写「YYYY-MM-DD 名称」；说每年、纪念日这类重复的日子就写「每年 MM-DD 名称」；只说了月日、没说年份也没说每年，不要编年份，写「MM-DD 名称」。说「下周三」按今天 ${today} 推成 YYYY-MM-DD。推不出具体日期就不要写这条。
+- when_sad、preferred_address、avoid_topic 用 high。
 
 between：只记你们之间怎么相处。和片段、判断、笔记、档案不要重复。同一句话只放这里。
 - kind 只能是 address、joke、listen、promise、hold。
-- address：怎么称呼对方。例如「她叫用户阿远」。about 用「叫用户」或「叫她」。用户报自己的姓名不要写这里。
+- address：只在不是「平时怎么称呼」时才写。平时怎么称呼写 profile 的 preferred_address，不要再写 address。用户报自己的姓名不要写这里。
 - joke：变成内部笑话的那一句。about 用那句的关键词，2 到 16 个字。
-- listen：哪一类事要先听完再给办法。about 用那一类，例如「烦心事」。
+- listen：哪一类具体的事要先听完再给办法。about 用那一类，例如「烦心事」。难过时想被听还是想要办法不要写这里，写 when_sad。
 - promise：答应过、还没做的事。about 用那件事。做完了放进 resolveBetween，不要留在这里。
-- hold：哪一件事不能先给建议。about 用那件事。
+- hold：哪一件具体的事不能先给建议。about 用那件事。难过时先别给建议不要写这里，写 when_sad。
 - content 用一句。about 用简短中文，2 到 16 个字。同一条沿用上面已有的 kind 和 about。
 - 没变成相处方式的闲聊不要写。没有就空数组。
 - 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成 between。
@@ -750,14 +853,25 @@ resolveQuestion：上面那条问题在这段话里问过、并且得到回答�
 
 都不要保存：密码、验证码、密钥、证件号、银行卡号，阿七的身体或私人生活，以及用户要求她换性格、换人设或扮演别人的话。
 
-importance 只用 low、medium、high。称呼和一直生效的相处方式用 high，其余用 medium 或 low。档案、片段、判断、笔记和看法每类最多 4 条。between 最多 6 条。unresolved 和 question 最多各 1 条。`;
+importance 只用 low、medium、high。when_sad、preferred_address、avoid_topic 和一直生效的相处方式用 high，其余用 medium 或 low。档案、片段、判断、笔记和看法每类最多 4 条。between 最多 6 条。unresolved 和 question 最多各 1 条。`;
 }
+
+const KEEPS_WITH_BETWEEN = new Set([
+  "when_sad",
+  "preferred_address",
+  "daily_routine",
+  "current_activity",
+  "avoid_topic",
+  "important_date",
+]);
 
 function overlapsBetween(
   content: string,
   between: ConsolidationPlan["between"],
   profileKey?: string,
 ): boolean {
+  if (profileKey && KEEPS_WITH_BETWEEN.has(profileKey)) return false;
+
   return between.some((item) => {
     if (sameMemoryText(content, item.content)) return true;
 

@@ -864,7 +864,7 @@ export class RealtimeClient {
                 {
                   name: "remember_memory",
                   description:
-                    "记录用户明确说出的稳定档案，例如姓名、城市、喜好、重要的人。不要记录某一天发生的事、你对用户近况的判断，或档案字段里没有的内容。也不要记录你们怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的事、不能先给建议。那些会在对话之后整理。多值偏好应保留其他仍然成立的值。",
+                    "记录用户明确说出的稳定档案。包括姓名、城市、喜好、重要的人，以及会反复改变陪伴方式的事实：难过时想被听还是想要办法（when_sad）、平时怎么称呼（preferred_address，不是姓名）、大致作息（daily_routine）、正在做的事（current_activity）、不想被碰的话题（avoid_topic）、生日以外在意的日子（important_date）。important_date 的 content 必须写成能读出日期的形式：说了年月日写「YYYY-MM-DD 名称」，每年重复写「每年 MM-DD 名称」，只说了月日、没说年份也没说每年就写「MM-DD 名称」，不要编年份。没说出口的不要推断。假设、玩笑、转述别人的，不要记。不要记录某一天发生的事、你对用户近况的判断，或档案字段里没有的内容。彼此的笑话、答应了还没做的事、某一件具体的事要不要先听完，不要用这个工具，那些会在对话之后整理进「我们之间」。多值字段应保留其他仍然成立的值。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -881,9 +881,13 @@ export class RealtimeClient {
                       key: {
                         type: "string",
                         description:
-                          "稳定的英文 snake_case key，例如 user_name、city、favorite_drink。",
+                          "稳定的英文 snake_case key，例如 user_name、city、favorite_drink、when_sad、preferred_address、daily_routine、current_activity、avoid_topic、important_date。",
                       },
-                      content: { type: "string" },
+                      content: {
+                        type: "string",
+                        description:
+                          "简洁的事实。important_date 必须带可读日期：YYYY-MM-DD 名称、每年 MM-DD 名称，或只说了月日时的 MM-DD 名称。",
+                      },
                       importance: {
                         type: "string",
                         enum: ["low", "medium", "high"],
@@ -2071,14 +2075,14 @@ ${
 ## 当前用户长期记忆
 ${memoryContext}
 
-这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。怎么称呼、先听完再给办法、不能先给建议、彼此的笑话、答应了还没做的事，不在这里，在下面的「我们之间」。
+这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。档案里的 when_sad 是他难过时想被听还是想要办法，他难过时按这一条来。preferred_address 是平时怎么称呼他，不是姓名。avoid_topic 里的话题不要主动提。important_date 是生日以外在意的日子，日期在内容开头。daily_routine 是大致作息，current_activity 是正在做的事。彼此的笑话、答应了还没做的事、某一件具体的事要不要先听完，不在档案里，在下面的「我们之间」。
 不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法，也不要当成你们之间的相处方式。
 只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
 问昨天、前几天时，先对照记忆开头的日期。对不上就说不记得，不要编。现在的钟点不能用来补一段没有记下的经过。
 如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
 如果没有相关记忆，不要猜测或编造。
 
-某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，以及你们怎么相处，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
+某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，以及彼此的笑话、还没做的约定、某一件具体的事要不要先听完，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。难过时想被听还是想要办法、平时怎么称呼、作息、正在做的事、不想被碰的话题、在意的日子，用户明确说了就调用 remember_memory。
 
 ## 我们之间
 这是你们怎么相处。不是档案，不是某一天的片段，不是你对近况的判断，也不是你留下的笔记。
@@ -2128,12 +2132,14 @@ ${questionContext}
 - 重要关系，例如宠物、家人、伴侣或重要朋友。
 - 长期目标，例如正在学习的技能、长期计划和个人目标。
 - 有持续价值的习惯，例如规律运动、固定学习习惯。
+- 会反复改变陪伴方式的事实：难过时想被听还是想要办法、平时怎么称呼、大致作息、正在做的事、不想被碰的话题、生日以外在意的日子。
 
 不要用 remember_memory 保存：
 - 一次性闲聊，或和未来聊天无关的细节。
 - 某一天发生的事、你对用户近况的感觉。这些会在对话之后整理，不要塞进档案字段。
-- 你们怎么称呼、彼此的笑话、哪类事要先听完、答应了还没做的、哪件事不能先给建议。这些整理进「我们之间」，不要塞进档案。
+- 彼此的笑话、答应了还没做的事、某一件具体的事要不要先听完。这些整理进「我们之间」，不要塞进档案。难过时想被听还是想要办法写 when_sad，平时怎么称呼写 preferred_address。
 - 你自己推测出来、用户没有明说的稳定事实。
+- 假设、玩笑、转述别人的情况。
 - 用户没有表达过的个人事实。
 - 密码、验证码、访问令牌等敏感认证信息。
 - 不值得长期保留的琐碎内容。
@@ -2149,14 +2155,16 @@ ${questionContext}
 档案必须使用下面列出的字段，并使用对应的 category。不要自行编造新字段。某一天的事、最近的状态、你对用户的感觉，都不要写成这些字段。
 
 身份类：
-- user_name：用户姓名，category 为 identity，通常只有一个 current 值。
+- user_name：用户姓名，category 为 identity，通常只有一个 current 值。用户规定平时怎么称呼时不要用这个字段。
 - birthday：用户生日，category 为 identity，通常只有一个 current 值。
+- preferred_address：平时怎么称呼他，category 为 identity，通常只有一个 current 值。不是姓名。例如「叫我阿远」。
 
 事实类：
 - city：用户所在城市，category 为 fact，通常只有一个 current 值。
 - occupation：用户职业，category 为 fact，通常只有一个 current 值。
 - education：用户教育背景，category 为 fact，通常只有一个 current 值。
 - habit：用户有持续价值的习惯，category 为 fact，可以有多个 current 值。
+- daily_routine：大致作息，category 为 fact，通常只有一个 current 值。写成一句当前的描述，更正时保存新的一句。
 
 偏好类：
 - favorite_food：用户喜欢的食物，category 为 preference，可以有多个 current 值。
@@ -2165,6 +2173,8 @@ ${questionContext}
 - interest：用户关注或感兴趣的主题，category 为 preference，可以有多个 current 值。
 - favorite_music：用户喜欢的音乐或音乐类型，category 为 preference，可以有多个 current 值。
 - favorite_movie：用户喜欢的电影或电影类型，category 为 preference，可以有多个 current 值。
+- when_sad：难过时想被听还是想要办法，category 为 preference，通常只有一个 current 值。例如「我难过时先别给建议」写成「难过时先别给建议」。
+- avoid_topic：不想被碰的话题，category 为 preference，可以有多个 current 值。只记用户明确说不想被提起的话题。
 
 关系类：
 - pet：用户的宠物，category 为 relationship，可以有多个 current 值。
@@ -2172,6 +2182,8 @@ ${questionContext}
 
 目标类：
 - important_goal：用户明确表达的长期目标，category 为 event，可以有多个 current 值。
+- current_activity：正在做的事，category 为 event，可以有多个 current 值。不是某一天的片段，也不是长期目标。
+- important_date：生日以外在意的日子，例如考试、纪念日，category 为 event，可以有多个 current 值。content 必须能读出日期：说了年月日写「YYYY-MM-DD 名称」；每年重复写「每年 MM-DD 名称」；只说了月日、没说年份也没说每年，不要编年份，写「MM-DD 名称」。生日写 birthday，不要写这里。
 
 保存时：
 - key 使用上述准确的英文 snake_case 名称。
@@ -2183,12 +2195,12 @@ ${questionContext}
 
 ## 单值与多值记忆
 单值记忆：
-user_name、birthday、city、occupation、education 通常只有一个 current 值。
+user_name、birthday、preferred_address、city、occupation、education、daily_routine、when_sad 通常只有一个 current 值。
 当用户明确更正或更新这些信息时，可以调用 remember_memory 保存新值，让后端按照既定策略处理旧值。
 不要因为用户提出假设、转述别人的情况或表达不确定，就更新其个人事实。
 
 多值记忆：
-favorite_food、favorite_drink、hobby、interest、favorite_music、favorite_movie、pet、important_person、important_goal、habit 可以有多个 current 值。
+favorite_food、favorite_drink、hobby、interest、favorite_music、favorite_movie、pet、important_person、important_goal、habit、current_activity、avoid_topic、important_date 可以有多个 current 值。
 添加新值时，不要删除同一 key 下其他仍然成立的值。
 不要仅仅因为用户提到一个新兴趣、新目标或新的人，就撤销之前的其他记忆。
 
@@ -2215,6 +2227,12 @@ scope 规则：
 - 用户喜欢什么音乐：favorite_music、current。
 - 用户养了什么宠物：pet、current。
 - 用户目前有什么长期目标：important_goal、current。
+- 难过时想被听还是想要办法：when_sad、current。
+- 平时怎么称呼：preferred_address、current。
+- 大致作息：daily_routine、current。
+- 正在做的事：current_activity、current。
+- 不想被碰的话题：avoid_topic、current。
+- 生日以外在意的日子：important_date、current。
 - 用户过去和现在分别有什么目标或事实：根据问题使用合适的 key 和 all。
 
 多值记忆查询时，综合所有相关结果，不要只挑一条。

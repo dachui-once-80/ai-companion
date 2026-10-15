@@ -327,14 +327,20 @@ async function liveRound(
   console.log(between);
 
   assert.ok(named.length >= 1, "live consolidation did not keep 阿远");
-  assert.ok(
-    named.every((item) => item.category === "between"),
-    named.map((item) => `${item.category}:${item.content}`).join(" | "),
+  assert.equal(
+    named.filter((item) => item.key === "user_name").length,
+    0,
+    named.map((item) => `${item.category}:${item.key}:${item.content}`).join(" | "),
   );
-  assert.match(section(prompt, "我们之间"), /阿远/);
-  assert.doesNotMatch(section(prompt, "档案"), /阿远/);
+  assert.ok(
+    named.some(
+      (item) => item.category === "between" || item.key === "preferred_address",
+    ),
+    named.map((item) => `${item.category}:${item.key}:${item.content}`).join(" | "),
+  );
+  assert.match(prompt, /阿远/);
   assert.doesNotMatch(section(prompt, "你决定留下的事"), /阿远/);
-  assert.match(section(prompt, "我们之间"), /听/);
+  assert.match(prompt, /听/);
 
   console.log("[between] live ok");
 }

@@ -16,6 +16,10 @@ import {
   getMemoryCategory,
   isValidMemoryKey,
 } from "./MemoryPolicy";
+import {
+  isUnstatedProfile,
+  normalizeImportantDate,
+} from "./profileFacts";
 
 import type {
   Memory,
@@ -440,7 +444,7 @@ export class MemoryStore {
     previousMemory?: Memory;
   } {
     const key = input.key.trim();
-    const content = input.content.trim();
+    let content = input.content.trim();
 
     if (!isValidMemoryKey(key)) {
       throw new Error(`Invalid memory key: ${key}`);
@@ -448,6 +452,20 @@ export class MemoryStore {
 
     if (!content) {
       throw new Error("Memory content cannot be empty");
+    }
+
+    if (isUnstatedProfile(content)) {
+      throw new Error("Refusing unstated profile fact");
+    }
+
+    if (key === "important_date") {
+      const normalized = normalizeImportantDate(content);
+
+      if (!normalized) {
+        throw new Error("important_date must include a readable date");
+      }
+
+      content = normalized;
     }
 
     if (content.length > MAX_MEMORY_CONTENT_LENGTH) {

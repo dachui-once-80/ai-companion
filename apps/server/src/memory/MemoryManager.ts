@@ -15,6 +15,10 @@ import {
 } from "./between";
 import type { Memory, MemoryImportance } from "./MemoryTypes";
 import {
+    parseImportantDate,
+    type ReadableDate,
+} from "./profileFacts";
+import {
     contentKey,
     formatToday,
     isOpenCategory,
@@ -27,6 +31,15 @@ const importanceRank: Record<MemoryImportance, number> = {
     medium: 2,
     low: 1,
 };
+
+const COMPANIONSHIP_KEYS = new Set([
+    "when_sad",
+    "preferred_address",
+    "daily_routine",
+    "current_activity",
+    "avoid_topic",
+    "important_date",
+]);
 
 function byImportanceThenTime(a: Memory, b: Memory): number {
     return (
@@ -50,6 +63,14 @@ export class MemoryManager {
 
     recall(options: RecallMemoryOptions) {
         return this.store.recall(options);
+    }
+
+    /** 当前档案里、以后能按日期读出来的在意的日子。 */
+    listImportantDates(): ReadableDate[] {
+        return this.store
+            .findCurrentByKey("important_date")
+            .map((memory) => parseImportantDate(memory.content))
+            .filter((item): item is ReadableDate => item !== null);
     }
 
     getAll() {
@@ -115,9 +136,14 @@ export class MemoryManager {
             "- 最近发生的事按日期理解。用户问昨天、前几天时，先对照今天的日期；没有记录就说不记得。",
             "- 你对用户的判断是你自己的感觉。可以轻轻带出来，不要当成用户确认过的资料。用户说的不一样，以现在说的为准。",
             "- 你决定留下的事是以后还用得上、又不适合放进档案的内容。",
-            "- 怎么称呼、先听完再给办法、不能先给建议、彼此的笑话、答应了还没做的事，不在这里。那些在「我们之间」。",
+            "- when_sad 是用户难过时想被听还是想要办法。他难过时按这一条来，不要先给建议，除非这一条写的是想要办法。",
+            "- preferred_address 是平时怎么称呼他，不是姓名。",
+            "- avoid_topic 里的话题不要主动提。",
+            "- important_date 是生日以外在意的日子。日期在内容开头，每年重复的以「每年 MM-DD」开头。",
+            "- daily_routine 是大致作息，current_activity 是正在做的事。",
+            "- 彼此的笑话、答应了还没做的事、某一件具体的事要不要先听完，不在档案里。那些在「我们之间」。",
             "- 问更早的事，或上下文里没有的事，调用 recall_memory，用事情里的词去查，不要编档案 key。",
-            "- 用户明确说出姓名、城市、喜好这类稳定事实时，用 remember_memory 写入对应档案。某一天的事、近况和你的感觉不要写进档案。",
+            "- 用户明确说出姓名、城市、喜好、难过时想被怎样陪、平时怎么称呼、作息、正在做的事、不想被碰的话题、在意的日子时，用 remember_memory 写入对应档案。某一天的事、近况和你的感觉不要写进档案。没说出口的不要推断。假设、玩笑、转述别人的不要写。",
             "- 不要编造这里没有的个人信息。",
         ].join("\n");
     }
@@ -224,14 +250,22 @@ export class MemoryManager {
                 memory.content.trim() !== "",
         );
 
-        const profile = current
+        const profileAll = current
             .filter(
                 (memory) =>
                     !isOpenCategory(memory.category) &&
                     memory.key.trim() !== "",
             )
-            .sort(byImportanceThenTime)
-            .slice(0, profileLimit);
+            .sort(byImportanceThenTime);
+        const companionship = profileAll
+            .filter((memory) => COMPANIONSHIP_KEYS.has(memory.key))
+            .slice(0, 16);
+        const profile = [
+            ...companionship,
+            ...profileAll
+                .filter((memory) => !COMPANIONSHIP_KEYS.has(memory.key))
+                .slice(0, profileLimit),
+        ];
 
         const episodes = current
             .filter((memory) => memory.category === "episode")
