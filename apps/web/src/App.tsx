@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import MemoryPanel from "./memory/MemoryPanel";
+import { formatDate } from "./formatDate";
 import {
   parseCompanionAffect,
   RealtimeClient,
@@ -7,111 +9,69 @@ import {
   type CompanionEmotion,
 } from "./realtime/RealtimeClient";
 import type { Floor } from "./realtime/presence";
+import TalkPage from "./talk/TalkPage";
+import {
+  clearDraft,
+  createDraft,
+  finishDraft,
+  saveDraft,
+  sentenceLooksFinished,
+  settleStoredTalk,
+  type LastTalk,
+  type TalkDraft,
+  type TalkLine,
+} from "./talk/lastTalk";
 
 import "./App.css";
 
-type TranscriptLine = {
-  id: number;
-  speaker: string;
-  text: string;
-};
-
 type VisualState = "idle" | "listening" | "thinking" | "speaking";
+type Screen = "meet" | "memory" | "talk";
 
-type MemoryCategory =
-  | "identity"
-  | "preference"
-  | "fact"
-  | "event"
-  | "relationship"
-  | "episode"
-  | "impression"
-  | "note";
+const NAME_KEY = "companion.currentName";
 
-type MemoryImportance = "low" | "medium" | "high";
+function readScreen(): Screen {
+  const hash = window.location.hash.replace(/^#/, "");
 
-type MemoryStatus = "current" | "historical";
+  if (hash === "memory") return "memory";
+  if (hash === "talk") return "talk";
 
-type Memory = {
-  id: string;
-  category: MemoryCategory;
-  key: string;
-  content: string;
-  importance: MemoryImportance;
-  status: MemoryStatus;
-  source: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-const categoryLabels: Record<MemoryCategory, string> = {
-  identity: "身份",
-  preference: "偏好",
-  fact: "事实",
-  event: "事件",
-  relationship: "关系",
-  episode: "片段",
-  impression: "判断",
-  note: "留下的",
-};
-
-const importanceLabels: Record<MemoryImportance, string> = {
-  low: "低",
-  medium: "中",
-  high: "高",
-};
-
-function displayKey(key: string): string {
-  if (
-    key.startsWith("episode:") ||
-    key.startsWith("impression:") ||
-    key.startsWith("note:")
-  ) {
-    return key.slice(key.indexOf(":") + 1);
-  }
-
-  return key;
+  return "meet";
 }
 
-function formatDate(value: string) {
-  if (!value) return "时间未知";
+function cachedName(): string {
+  try {
+    return sessionStorage.getItem(NAME_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
 
-  const date = new Date(value);
+function nameMark(name: string): string {
+  const chars = Array.from(name.trim());
 
-  if (Number.isNaN(date.getTime())) return value;
-
-  return date.toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return chars[chars.length - 1] ?? "";
 }
 
 function App() {
   const clientRef = useRef<RealtimeClient | null>(null);
-  const linesRef = useRef<TranscriptLine[]>([]);
   const lineIdRef = useRef(0);
   const visualStateRef = useRef<VisualState>("idle");
   const holdListeningRef = useRef(false);
   const presenceRef = useRef<Floor>("together");
+  const draftRef = useRef<TalkDraft | null>(null);
+  const initialName = cachedName();
+  const nameRef = useRef(initialName);
 
   const [state, setState] = useState<ConnectionState>("idle");
-  const [lines, setLines] = useState<TranscriptLine[]>([]);
+  const [screen, setScreen] = useState<Screen>(readScreen);
+  const [companionName, setCompanionName] = useState(initialName);
+  const [liveLines, setLiveLines] = useState<TalkLine[]>([]);
+  const [unfinishedLive, setUnfinishedLive] = useState("");
+  const [lastTalk, setLastTalk] = useState<LastTalk | null>(settleStoredTalk);
   const [presence, setPresence] = useState<Floor>("together");
   const [emotion, setEmotion] = useState<CompanionEmotion>("calm");
-  const [moodCause, setMoodCause] = useState("");
   const affectEpoch = useRef(0);
   const [visualState, setVisualState] = useState<VisualState>("idle");
-
-  const [memories, setMemories] = useState<Memory[]>([]);
-  const [memoryLoading, setMemoryLoading] = useState(false);
-  const [memoryError, setMemoryError] = useState("");
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | MemoryStatus
-  >("current");
   const [notice, setNotice] = useState("");
   const voiceOpenRef = useRef(false);
   const handledReminderIds = useRef<Set<string>>(new Set());
@@ -122,95 +82,166 @@ function App() {
     leftAt: string;
   } | null>(null);
 
-  const appendLine = useCallback((speaker: string, text: string) => {
-    const previous = linesRef.current;
-    const last = previous[previous.length - 1];
-    const next =
-      last && last.speaker === speaker
-        ? [...previous.slice(0, -1), { ...last, text: last.text + text }]
-        : [
-            ...previous,
-            { id: ++lineIdRef.current, speaker, text },
-          ].slice(-8);
+  const applyName = useCallback((next: string) => {
+    const trimmed = next.trim();
 
-    linesRef.current = next;
-    setLines(next);
-  }, []);
+    if (!trimmed) return;
 
-  const clearLines = useCallback(() => {
-    linesRef.current = [];
-    setLines([]);
-  }, []);
-
-  const updateVisualState = useCallback((next: VisualState) => {
-    visualStateRef.current = next;
-    setVisualState(next);
-  }, []);
-
-  const loadMemories = useCallback(async () => {
-    setMemoryLoading(true);
-    setMemoryError("");
+    nameRef.current = trimmed;
+    setCompanionName(trimmed);
 
     try {
-      const response = await fetch("/api/memory");
-
-      if (!response.ok) {
-        throw new Error(`读取记忆失败：HTTP ${response.status}`);
-      }
-
-      const data: unknown = await response.json();
-
-      // 兼容后端直接返回数组，或返回 { memories: [...] }。
-      const list =
-        Array.isArray(data)
-          ? data
-          : data &&
-            typeof data === "object" &&
-            "memories" in data &&
-            Array.isArray(data.memories)
-            ? data.memories
-            : null;
-
-      if (!list) {
-        throw new Error("记忆接口返回格式不符合预期");
-      }
-
-      setMemories(list as Memory[]);
-    } catch (error) {
-      console.error("[Memory] load failed", error);
-
-      setMemoryError(
-        error instanceof Error ? error.message : "读取记忆失败",
-      );
-    } finally {
-      setMemoryLoading(false);
+      sessionStorage.setItem(NAME_KEY, trimmed);
+    } catch {
+      // 记不住这次名字，下次打开再问身份接口。
     }
   }, []);
 
+  const loadIdentity = useCallback(async () => {
+    try {
+      const response = await fetch("/api/companion/identity");
+
+      if (!response.ok) return;
+
+      const data: unknown = await response.json();
+
+      if (
+        data &&
+        typeof data === "object" &&
+        "currentName" in data &&
+        typeof data.currentName === "string"
+      ) {
+        applyName(data.currentName);
+      }
+    } catch (error) {
+      console.warn("[Identity] load failed:", error);
+    }
+  }, [applyName]);
+
+  const publishLive = useCallback((draft: TalkDraft) => {
+    setLiveLines(draft.lines.slice(-8));
+    setUnfinishedLive(draft.unfinished);
+  }, []);
+
+  const appendLine = useCallback(
+    (speaker: string, text: string, fromCompanion: boolean) => {
+      const draft = draftRef.current;
+
+      if (!draft) return;
+
+      const previous = draft.lines;
+      const last = previous[previous.length - 1];
+      const next =
+        last && last.speaker === speaker
+          ? [...previous.slice(0, -1), { ...last, text: last.text + text }]
+          : [
+              ...previous,
+              {
+                id: ++lineIdRef.current,
+                speaker,
+                text,
+                fromCompanion,
+              },
+            ];
+
+      draft.lines = next;
+      saveDraft(draft);
+      publishLive(draft);
+    },
+    [publishLive],
+  );
+
+  const endSession = useCallback(() => {
+    const draft = draftRef.current;
+
+    draftRef.current = null;
+    setLiveLines([]);
+    setUnfinishedLive("");
+
+    if (!draft) return;
+
+    if (draft.lines.length === 0) {
+      clearDraft();
+      return;
+    }
+
+    const saved = finishDraft(draft);
+
+    if (saved) setLastTalk(saved);
+  }, []);
+
+  const startSession = useCallback(() => {
+    const draft = createDraft();
+
+    lineIdRef.current = 0;
+    draftRef.current = draft;
+    saveDraft(draft);
+    setLiveLines([]);
+    setUnfinishedLive("");
+  }, []);
+
+  const markUnfinished = useCallback(() => {
+    const draft = draftRef.current;
+    const last = draft?.lines[draft.lines.length - 1];
+
+    if (!draft || !last?.fromCompanion || !last.text.trim()) return;
+
+    draft.unfinished = last.text.trim();
+    saveDraft(draft);
+    setUnfinishedLive(draft.unfinished);
+  }, []);
+
+  const settleUnfinished = useCallback(() => {
+    const draft = draftRef.current;
+    const last = draft?.lines[draft.lines.length - 1];
+
+    if (!draft || !last?.fromCompanion) return;
+
+    const text = last.text.trim();
+
+    if (!text) return;
+
+    if (draft.unfinished) {
+      if (text !== draft.unfinished && sentenceLooksFinished(text)) {
+        draft.unfinished = "";
+      } else if (text !== draft.unfinished) {
+        draft.unfinished = text;
+      }
+    } else if (!sentenceLooksFinished(text)) {
+      draft.unfinished = text;
+    } else {
+      return;
+    }
+
+    saveDraft(draft);
+    setUnfinishedLive(draft.unfinished);
+  }, []);
+
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadMemories();
-    }, 0);
+    void loadIdentity();
+  }, [loadIdentity, screen]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadIdentity();
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [loadMemories]);
+  }, [loadIdentity]);
 
   useEffect(() => {
-    const onMemoryUpdated = () => {
-      void loadMemories();
-    };
+    const sync = () => setScreen(readScreen());
 
-    window.addEventListener("companion-memory-updated", onMemoryUpdated);
+    window.addEventListener("hashchange", sync);
 
     return () => {
-      window.removeEventListener(
-        "companion-memory-updated",
-        onMemoryUpdated,
-      );
+      window.removeEventListener("hashchange", sync);
     };
-  }, [loadMemories]);
+  }, []);
 
   useEffect(() => {
     if (state === "connected" || state === "connecting") return;
@@ -234,7 +265,6 @@ function App() {
         if (!active || !affect || affectEpoch.current !== seen) return;
 
         setEmotion(affect.expression);
-        setMoodCause(affect.cause);
       } catch (error) {
         console.warn("[Affect] settle failed:", error);
       }
@@ -289,7 +319,7 @@ function App() {
       });
 
       if ("Notification" in window && Notification.permission === "granted") {
-        new Notification("阿七", { body: line });
+        new Notification(nameRef.current || "她", { body: line });
       }
     };
 
@@ -469,37 +499,41 @@ function App() {
     };
   }, []);
 
+  const updateVisualState = useCallback((next: VisualState) => {
+    visualStateRef.current = next;
+    setVisualState(next);
+  }, []);
+
   const connect = async () => {
-    // 防止重复创建连接。
     if (clientRef.current) return;
+
     const client = new RealtimeClient();
+
     try {
       setState("connecting");
-      clearLines();
+      endSession();
+      startSession();
       presenceRef.current = "together";
       setPresence("together");
-
       updateVisualState("idle");
-
-
       clientRef.current = client;
 
       client.setMessageHandler((message) => {
         console.log("[App message]", message);
 
-        if (clientRef.current !== client) {
-          return;
-        }
+        if (clientRef.current !== client) return;
 
         if (message.type === "memory_updated") {
           console.log("[Memory] refreshing memory list");
         }
 
+        if (message.type === "renamed") {
+          applyName(message.name);
+        }
+
         if (message.type === "emotion_changed") {
           affectEpoch.current += 1;
           setEmotion(message.emotion);
-          setMoodCause(message.cause);
-          console.log("[Emotion] changed to:", message.emotion, message.cause);
         }
 
         if (message.type === "presence") {
@@ -511,10 +545,12 @@ function App() {
           message.type === "input_transcript" ||
           message.type === "output_transcript"
         ) {
-          const speaker =
-            message.type === "input_transcript" ? message.speaker : "阿七";
+          const fromCompanion = message.type === "output_transcript";
+          const speaker = fromCompanion
+            ? nameRef.current || "她"
+            : message.speaker;
 
-          appendLine(speaker, message.text);
+          appendLine(speaker, message.text, fromCompanion);
         }
 
         if (message.type === "connected") {
@@ -523,11 +559,13 @@ function App() {
           setState("connected");
           updateVisualState("listening");
         }
+
         if (message.type === "playback_interrupted") {
-          // 用户插话，已经把喇叭里的声音停掉。
           holdListeningRef.current = true;
+          markUnfinished();
           updateVisualState("listening");
         }
+
         if (message.type === "audio_playback_started") {
           holdListeningRef.current = false;
           updateVisualState("speaking");
@@ -544,7 +582,7 @@ function App() {
         }
 
         if (message.type === "turn_complete") {
-          // 本轮模型输出完成，返回聆听状态。
+          settleUnfinished();
           updateVisualState("listening");
         }
 
@@ -553,52 +591,42 @@ function App() {
 
           voiceOpenRef.current = false;
           clientRef.current = null;
-
+          endSession();
           setState("error");
           updateVisualState("idle");
-
-          // 清理旧连接。后续 disconnected 事件会被上面的身份检查忽略。
           client.disconnect();
           return;
         }
 
         if (message.type === "disconnected") {
           voiceOpenRef.current = false;
+          endSession();
           setState("idle");
           updateVisualState("idle");
           return;
         }
+
         if (message.type === "closed") {
-          console.warn(
-            "[Connection] connection closed:",
-            message.reason,
-          );
+          console.warn("[Connection] connection closed:", message.reason);
 
           voiceOpenRef.current = false;
           clientRef.current = null;
-
+          endSession();
           setState("idle");
           updateVisualState("idle");
 
-          if (
-            message.reason?.includes(
-              "User location is not supported",
-            )
-          ) {
+          if (message.reason?.includes("User location is not supported")) {
             setNotice(
               "Gemini 拒绝了当前代理出口 IP。请在 Clash 换一个美国/日本/新加坡节点，打开 /api/gemini/health 确认 ok:true 后再呼叫。",
             );
           } else if (message.reason) {
             setNotice(`连接已断开：${message.reason}`);
           }
-
-          return;
         }
       });
 
       await client.connect();
 
-      // 避免连接过程中用户已经断开后又被设回 connected。
       if (clientRef.current === client) {
         voiceOpenRef.current = true;
         setState("connected");
@@ -606,14 +634,11 @@ function App() {
       }
     } catch (error) {
       console.error("[Connection] failed", error);
-
-      // 无论是否仍是当前客户端，都清理失败的客户端。
       client.disconnect();
 
-      // 只有当前客户端才能修改界面状态。
       if (clientRef.current === client) {
         clientRef.current = null;
-
+        endSession();
         setState("error");
         updateVisualState("idle");
       }
@@ -623,470 +648,175 @@ function App() {
   const disconnect = () => {
     const client = clientRef.current;
 
-    // 先清空引用，防止后续异步操作误判为仍在连接。
     voiceOpenRef.current = false;
     clientRef.current = null;
-
+    endSession();
     client?.disconnect();
-
     setState("idle");
-    clearLines();
     presenceRef.current = "together";
     setPresence("together");
-
-    setEmotion("calm");
     updateVisualState("idle");
   };
 
-  const editMemory = async (memory: Memory) => {
-    const content = window.prompt(
-      "修改这条记忆的内容：",
-      memory.content,
-    );
-
-    if (content === null) return;
-
-    const trimmedContent = content.trim();
-
-    if (!trimmedContent) {
-      setNotice("记忆内容不能为空");
-      return;
-    }
-
-    if (trimmedContent.length > 500) {
-      setNotice("记忆内容不能超过 500 个字符");
-      return;
-    }
-
-    const importanceInput = window.prompt(
-      "设置重要程度：low / medium / high",
-      memory.importance,
-    );
-
-    if (importanceInput === null) return;
-
-    const importance = importanceInput.trim().toLowerCase();
-
-    if (!["low", "medium", "high"].includes(importance)) {
-      setNotice("重要程度只能填写 low、medium 或 high");
-      return;
-    }
-
-    try {
-      const response = await fetch(
-        `/api/memory/${encodeURIComponent(memory.id)}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content: trimmedContent,
-            importance,
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const result = await response.json().catch(() => null);
-
-        throw new Error(
-          result?.error ?? `编辑失败：HTTP ${response.status}`,
-        );
-      }
-
-      setNotice("记忆已更新");
-      await loadMemories();
-    } catch (error) {
-      console.error("[Memory] update failed", error);
-
-      setNotice(
-        error instanceof Error ? error.message : "编辑记忆失败",
-      );
-    }
-  };
-
-  const deleteMemory = async (memory: Memory) => {
-    const confirmed = window.confirm(
-      `确定删除这条记忆吗？\n\n${memory.content}\n\n删除后无法从这里恢复。`,
-    );
-
-    if (!confirmed) return;
-
-    try {
-      const response = await fetch(
-        `/api/memory/${encodeURIComponent(memory.id)}`,
-        { method: "DELETE" },
-      );
-
-      if (!response.ok) {
-        const result = await response.json().catch(() => null);
-
-        throw new Error(
-          result?.error ?? `删除失败：HTTP ${response.status}`,
-        );
-      }
-
-      setNotice("记忆已删除");
-      await loadMemories();
-    } catch (error) {
-      console.error("[Memory] delete failed", error);
-
-      setNotice(
-        error instanceof Error ? error.message : "删除记忆失败",
-      );
-    }
-  };
-
+  const called = companionName || "她";
   const isConnected = state === "connected";
-
-  const filteredMemories = memories.filter((memory) => {
-    const matchesStatus =
-      statusFilter === "all" || memory.status === statusFilter;
-
-    const keyword = search.trim().toLowerCase();
-
-    const matchesSearch =
-      !keyword ||
-      memory.content.toLowerCase().includes(keyword) ||
-      memory.key.toLowerCase().includes(keyword) ||
-      displayKey(memory.key).toLowerCase().includes(keyword) ||
-      (categoryLabels[memory.category] ?? memory.category)
-        .toLowerCase()
-        .includes(keyword);
-
-    return matchesStatus && matchesSearch;
-  });
-
-  const currentCount = memories.filter(
-    (memory) => memory.status === "current",
-  ).length;
-
-  const historicalCount = memories.filter(
-    (memory) => memory.status === "historical",
-  ).length;
+  const unfinishedOutside =
+    Boolean(unfinishedLive) &&
+    !liveLines.some((line) => line.text === unfinishedLive);
 
   const visualStateLabels: Record<VisualState, string> = {
     idle: "待机中",
     listening: "正在聆听",
-    thinking: "正在思考",
-    speaking: "正在回应",
+    thinking: "正在想",
+    speaking: "正在说",
   };
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#" aria-label="阿七首页">
-          <span className="brand-mark">七</span>
-          <span>
-            阿七 <small>PERSONAL AI</small>
-          </span>
+        <a className="brand" href="#meet" aria-label={`${called}，回到见面`}>
+          <span className="brand-mark">{nameMark(companionName) || "·"}</span>
+          <span className="brand-name">{called}</span>
         </a>
 
-        <span className="topbar-caption">你的私人 AI 伙伴</span>
+        <a className="topbar-link" href="#memory">
+          记忆
+        </a>
       </header>
 
-      <div className="dashboard">
-        <section className="companion-panel">
-          <div className="eyebrow">YOUR COMPANION</div>
-
-          <div
-            className={[
-              "orb",
-              isConnected ? "orb-active" : "",
-              `orb-emotion-${emotion}`,
-              `orb-mode-${visualState}`,
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            role="img"
-            aria-label={`阿七当前情绪：${emotionLabels[emotion]}${moodCause ? `，还留着：${moodCause}` : ""}，状态：${visualStateLabels[visualState]}`}
-          >
-            <div className="orb-aura" />
-
-            <div className="orb-face">
-              <div className="orb-eyes">
-                <span className="orb-eye orb-eye-left" />
-                <span className="orb-eye orb-eye-right" />
+      {screen === "memory" ? (
+        <div className="stage stage-wide">
+          <MemoryPanel name={companionName} />
+        </div>
+      ) : screen === "talk" ? (
+        <div className="stage">
+          <TalkPage talk={lastTalk} />
+        </div>
+      ) : (
+        <div className="stage">
+          <section className="companion-panel">
+            <div
+              className={[
+                "orb",
+                isConnected ? "orb-active" : "",
+                `orb-emotion-${emotion}`,
+                `orb-mode-${visualState}`,
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              role="img"
+              aria-label={`${called}，${visualStateLabels[visualState]}`}
+            >
+              <div className="orb-aura" />
+              <div className="orb-face">
+                <div className="orb-eyes">
+                  <span className="orb-eye orb-eye-left" />
+                  <span className="orb-eye orb-eye-right" />
+                </div>
+                <div className="orb-mouth" />
               </div>
-
-              <div className="orb-mouth" />
             </div>
 
-            {/* <div className="orb-core">七</div> */}
-          </div>
+            <h1>{called}</h1>
+            <p className="companion-subtitle">一直在这里，听你说。</p>
 
-          <h1>阿七</h1>
+            {isConnected && (
+              <p className="emotion-status">{visualStateLabels[visualState]}</p>
+            )}
 
-          <p className="companion-subtitle">一直在这里，听你说。</p>
+            {isConnected && presence !== "together" && (
+              <p className={`emotion-status presence-${presence}`}>
+                {presenceLabels[presence]}
+              </p>
+            )}
 
-          <p className="emotion-status">
-            当前情绪：{emotionLabels[emotion]}
-          </p>
+            <div className={`connection-pill status-${state}`}>
+              <span className="status-dot" />
+              {state === "idle" && "还没醒呢"}
+              {state === "connecting" && "正在醒来……"}
+              {state === "connected" && "嗯，我在。"}
+              {state === "error" && "连接遇到问题"}
+            </div>
 
-          {moodCause ? (
-            <p className="emotion-status">还留着：{moodCause}</p>
-          ) : null}
-
-          <p className="emotion-status">
-            当前状态：{visualStateLabels[visualState]}
-          </p>
-
-          {isConnected && (
-            <p className={`emotion-status presence-${presence}`}>
-              {presenceLabels[presence]}
-            </p>
-          )}
-
-          <div className={`connection-pill status-${state}`}>
-            <span className="status-dot" />
-            {state === "idle" && "还没醒呢"}
-            {state === "connecting" && "正在醒来……"}
-            {state === "connected" && "嗯，我在。"}
-            {state === "error" && "连接遇到问题"}
-          </div>
-
-          <div className="transcript-box">
-            <span className="transcript-label">最近的对话</span>
             {leftNote ? (
               <div className="left-note">
                 <span className="transcript-label">她留下的</span>
                 <p>{leftNote.text}</p>
-                <span className="left-note-time">{formatDate(leftNote.leftAt)}</span>
+                <span className="left-note-time">
+                  {formatDate(leftNote.leftAt)}
+                </span>
               </div>
             ) : null}
-            {lines.length === 0 ? (
-              <p className="transcript-line">呼叫阿七，开始你们的对话吧。</p>
-            ) : (
-              <div className="transcript-log">
-                {lines.map((line) => (
+
+            {lastTalk && (lastTalk.stoppedOn || lastTalk.unfinished) ? (
+              <a className="trace" href="#talk">
+                {lastTalk.stoppedOn &&
+                lastTalk.stoppedOn !== lastTalk.unfinished ? (
+                  <>
+                    <span className="trace-label">上次停在</span>
+                    <p>{lastTalk.stoppedOn}</p>
+                  </>
+                ) : null}
+
+                {lastTalk.unfinished ? (
+                  <>
+                    <span className="trace-label">她没说完</span>
+                    <p>{lastTalk.unfinished}</p>
+                    {lastTalk.stoppedOn === lastTalk.unfinished ? (
+                      <span className="trace-label">上次就停在这句</span>
+                    ) : null}
+                  </>
+                ) : null}
+
+                <span className="trace-open">翻这次对话</span>
+              </a>
+            ) : null}
+
+            {isConnected && (liveLines.length > 0 || unfinishedOutside) ? (
+              <div className="transcript-box">
+                {unfinishedOutside ? (
+                  <p className="transcript-line">
+                    <span>她没说完：</span>
+                    {unfinishedLive}
+                  </p>
+                ) : null}
+                {liveLines.map((line) => (
                   <p className="transcript-line" key={line.id}>
                     <span>{line.speaker}：</span>
                     {line.text}
                   </p>
                 ))}
               </div>
-            )}
-          </div>
+            ) : null}
 
-          {state === "idle" || state === "error" ? (
-            <button className="primary-button" onClick={connect}>
-              呼叫阿七 <span>↗</span>
-            </button>
-          ) : (
-            <button className="secondary-button" onClick={disconnect}>
-              让阿七休息
-            </button>
-          )}
-
-          <p className="privacy-note">
-            <span>✦</span> 你的伙伴 · 你的记忆 · 由你掌控
-          </p>
-        </section>
-
-        <section className="memory-panel">
-          <div className="memory-heading">
-            <div>
-              <div className="eyebrow">LONG-TERM MEMORY</div>
-              <h2>记忆管理</h2>
-              <p className="section-description">
-                档案、聊过的片段，和她留下的判断。
-              </p>
-            </div>
-
-            <button
-              className="refresh-button"
-              onClick={() => void loadMemories()}
-              disabled={memoryLoading}
-              title="刷新记忆"
-            >
-              <span className={memoryLoading ? "refresh-spinning" : ""}>
-                ↻
-              </span>
-              刷新
-            </button>
-          </div>
-
-          <div className="memory-stats">
-            <div className="stat-card">
-              <span>当前记忆</span>
-              <strong>{currentCount}</strong>
-              <small>正在使用</small>
-            </div>
-
-            <div className="stat-card">
-              <span>历史记忆</span>
-              <strong>{historicalCount}</strong>
-              <small>曾经发生过</small>
-            </div>
-
-            <div className="stat-card">
-              <span>记忆总数</span>
-              <strong>{memories.length}</strong>
-              <small>全部记录</small>
-            </div>
-          </div>
-
-          <div className="memory-toolbar">
-            <label className="search-box">
-              <span>⌕</span>
-
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="搜索记忆内容或关键词……"
-              />
-
-              {search && (
-                <button
-                  className="clear-search"
-                  onClick={() => setSearch("")}
-                  aria-label="清除搜索"
-                >
+            {notice ? (
+              <div className="notice-bar">
+                <span>{notice}</span>
+                <button onClick={() => setNotice("")} aria-label="关闭提示">
                   ×
                 </button>
-              )}
-            </label>
-
-            <div className="filter-tabs">
-              <button
-                className={statusFilter === "current" ? "selected" : ""}
-                onClick={() => setStatusFilter("current")}
-              >
-                当前
-              </button>
-
-              <button
-                className={statusFilter === "historical" ? "selected" : ""}
-                onClick={() => setStatusFilter("historical")}
-              >
-                历史
-              </button>
-
-              <button
-                className={statusFilter === "all" ? "selected" : ""}
-                onClick={() => setStatusFilter("all")}
-              >
-                全部
-              </button>
-            </div>
-          </div>
-
-          {notice && (
-            <div className="notice-bar">
-              <span>{notice}</span>
-              <button
-                onClick={() => setNotice("")}
-                aria-label="关闭提示"
-              >
-                ×
-              </button>
-            </div>
-          )}
-
-          {memoryError && (
-            <div className="error-panel">
-              <strong>暂时无法读取记忆</strong>
-              <p>{memoryError}</p>
-              <button onClick={() => void loadMemories()}>重试</button>
-            </div>
-          )}
-
-          {memoryLoading && memories.length === 0 && (
-            <div className="empty-state">
-              <div className="empty-icon">◌</div>
-              <p>正在读取阿七的记忆……</p>
-            </div>
-          )}
-
-          {!memoryLoading &&
-            !memoryError &&
-            filteredMemories.length === 0 && (
-              <div className="empty-state">
-                <div className="empty-icon">✧</div>
-
-                <strong>
-                  {search ? "没有找到匹配的记忆" : "这里暂时空空的"}
-                </strong>
-
-                <p>
-                  {search
-                    ? "试试其他关键词，或切换记忆分类。"
-                    : "当阿七开始记住你的生活，这里就会慢慢丰富起来。"}
-                </p>
-
-                {search && (
-                  <button
-                    className="text-button"
-                    onClick={() => setSearch("")}
-                  >
-                    清除搜索
-                  </button>
-                )}
               </div>
+            ) : null}
+
+            {state === "idle" || state === "error" ? (
+              <button className="primary-button" onClick={connect}>
+                呼叫{called} <span>↗</span>
+              </button>
+            ) : (
+              <button className="secondary-button" onClick={disconnect}>
+                让{called}休息
+              </button>
             )}
 
-          <div className="memory-list">
-            {filteredMemories.map((memory) => (
-              <article className="memory-card" key={memory.id}>
-                <div className="memory-card-top">
-                  <div className="memory-tags">
-                    <span className="category-tag">
-                      {categoryLabels[memory.category] ?? memory.category}
-                    </span>
-
-                    {memory.source === "companion" && (
-                      <span className="category-tag">她留下的</span>
-                    )}
-
-                    <span
-                      className={`importance-tag importance-${memory.importance}`}
-                    >
-                      {importanceLabels[memory.importance] ??
-                        memory.importance}
-                      重要
-                    </span>
-
-                    {memory.status === "historical" && (
-                      <span className="historical-tag">历史</span>
-                    )}
-                  </div>
-
-                  <span className="memory-key">{displayKey(memory.key)}</span>
-                </div>
-
-                <p className="memory-content">{memory.content}</p>
-
-                <div className="memory-card-bottom">
-                  <span className="memory-date">
-                    更新于 {formatDate(memory.updatedAt)}
-                  </span>
-
-                  <div className="memory-actions">
-                    <button onClick={() => void editMemory(memory)}>
-                      编辑
-                    </button>
-
-                    <button
-                      className="delete-button"
-                      onClick={() => void deleteMemory(memory)}
-                    >
-                      删除
-                    </button>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          {filteredMemories.length > 0 && (
-            <div className="list-footer">
-              显示 {filteredMemories.length} 条记忆
-            </div>
-          )}
-        </section>
-      </div>
+            <p className="privacy-note">
+              <span>✦</span> 你的伙伴 · 你的记忆 · 由你掌控
+            </p>
+          </section>
+        </div>
+      )}
 
       <footer className="app-footer">
-        <span>阿七 · 个人 AI 伙伴</span>
+        <span>{called}</span>
         <span>
           记忆由你掌控 <span className="footer-heart">♥</span>
         </span>
@@ -1100,16 +830,6 @@ const presenceLabels: Record<Floor, string> = {
   aside: "听你们说，先不插嘴",
   holding: "你让我先安静",
   joined: "加入你们了",
-};
-
-const emotionLabels: Record<CompanionEmotion, string> = {
-  calm: "平静",
-  happy: "开心",
-  caring: "心疼",
-  curious: "好奇",
-  worried: "担心",
-  annoyed: "烦",
-  wronged: "委屈",
 };
 
 export default App;

@@ -40,7 +40,8 @@ button:disabled {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+a:focus-visible {
   outline: 2px solid #b4a0ff;
   outline-offset: 3px;
 }
@@ -67,6 +68,7 @@ input:focus-visible {
 
 .brand {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 12px;
   color: #f5f0ff;
@@ -74,6 +76,12 @@ input:focus-visible {
   font-size: 18px;
   font-weight: 700;
   letter-spacing: 1px;
+}
+
+.brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand small {
@@ -96,18 +104,24 @@ input:focus-visible {
   color: #c5b4ff;
 }
 
-.topbar-caption {
-  color: #8c879a;
+.topbar-link {
+  flex-shrink: 0;
+  color: #c5b4ff;
   font-size: 13px;
+  text-decoration: none;
 }
 
-.dashboard {
-  display: grid;
-  grid-template-columns: minmax(250px, 0.75fr) minmax(0, 1.6fr);
-  gap: 28px;
-  max-width: 1440px;
+.topbar-link:hover {
+  color: #e4d9ff;
+}
+
+.stage {
+  width: min(440px, 100%);
   margin: 36px auto 48px;
-  align-items: start;
+}
+
+.stage-wide {
+  width: min(920px, 100%);
 }
 
 .companion-panel,
@@ -119,11 +133,10 @@ input:focus-visible {
 }
 
 .companion-panel {
-  position: sticky;
-  top: 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
   padding: 34px 25px 28px;
   text-align: center;
 }
@@ -654,7 +667,9 @@ input:focus-visible {
    ========================================= */
 
 .companion-panel h1 {
+  max-width: 100%;
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: 30px;
   font-weight: 600;
   letter-spacing: 3px;
@@ -733,9 +748,91 @@ input:focus-visible {
 }
 
 .left-note {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #ffffff10;
+  width: 100%;
+  margin-top: 22px;
+  padding: 16px;
+  border: 1px solid #ffffff12;
+  border-radius: 16px;
+  background: #111116;
+  text-align: left;
+}
+
+.trace {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid #ffffff12;
+  border-radius: 16px;
+  background: #111116;
+  color: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.trace p {
+  margin: 0;
+  color: #efeaf8;
+  font-size: 15px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.trace-label,
+.trace-open {
+  color: #8f87a8;
+  font-size: 11px;
+}
+
+.trace-open {
+  margin-top: 4px;
+  color: #c5b4ff;
+  font-size: 12px;
+}
+
+.trace:hover {
+  border-color: #b19be64a;
+}
+
+.page-back {
+  align-self: flex-start;
+  margin-bottom: 8px;
+  color: #c5b4ff;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.page-back:hover {
+  color: #e4d9ff;
+}
+
+.talk-page {
+  align-items: stretch;
+  text-align: left;
+}
+
+.talk-page h1,
+.talk-page .companion-subtitle {
+  text-align: center;
+}
+
+.talk-page h1 {
+  letter-spacing: 1px;
+}
+
+.talk-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.unfinished-mark {
+  margin-left: 8px;
+  color: #d7c4a1;
+  font-size: 11px;
+  font-style: normal;
 }
 
 .left-note p {
@@ -1009,10 +1106,11 @@ input:focus-visible {
 
 .notice-bar {
   display: flex;
+  width: 100%;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 14px;
+  margin: 16px 0 14px;
   padding: 11px 14px;
   border: 1px solid #9b88d52b;
   border-radius: 10px;
@@ -1250,24 +1348,12 @@ input:focus-visible {
     padding: 0 20px;
   }
 
-  .dashboard {
-    grid-template-columns: 1fr;
-    max-width: 700px;
+  .stage {
     margin-top: 24px;
-  }
-
-  .companion-panel {
-    position: static;
   }
 
   .orb {
     margin-top: 24px;
-  }
-
-  .companion-panel .transcript-box,
-  .companion-panel .primary-button,
-  .companion-panel .secondary-button {
-    max-width: 420px;
   }
 
   .memory-panel {
@@ -1294,13 +1380,11 @@ input:focus-visible {
     height: 34px;
   }
 
-  .topbar-caption {
-    font-size: 11px;
-    text-align: right;
+  .topbar-link {
+    font-size: 12px;
   }
 
-  .dashboard {
-    gap: 16px;
+  .stage {
     margin-top: 16px;
     margin-bottom: 28px;
   }

@@ -1678,6 +1678,29 @@ app.patch("/api/memory/:id", (req, res) => {
   }
 });
 
+app.delete("/api/memory/:id", (req, res) => {
+  try {
+    const removed = memoryManager.remove(req.params.id);
+
+    if (!removed) {
+      res.status(404).json({
+        error: "Memory not found",
+      });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[Memory] delete failed:", error);
+    res.status(500).json({
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+    });
+  }
+});
+
 app.get("/api/memory/search", async (req, res) => {
   const query = String(req.query.query ?? "").trim();
   const key = req.query.key

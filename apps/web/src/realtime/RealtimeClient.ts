@@ -45,6 +45,7 @@ export type RealtimeMessage =
   | { type: "output_transcript"; text: string }
   | { type: "turn_complete" }
   | { type: "memory_updated" }
+  | { type: "renamed"; name: string }
   | {
       type: "emotion_changed";
       emotion: CompanionEmotion;
@@ -2519,6 +2520,17 @@ export class RealtimeClient {
             typeof data.currentName === "string"
               ? data.currentName
               : newName;
+
+          if (response.ok) {
+            this.companionNames = [
+              ...new Set(
+                [currentName, ...this.companionNames]
+                  .map((item) => item.trim())
+                  .filter((item) => item.length > 0),
+              ),
+            ];
+            this.emit({ type: "renamed", name: currentName });
+          }
 
           responses.push({
             name,
