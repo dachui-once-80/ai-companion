@@ -76,6 +76,10 @@ const client = readFileSync(
   new URL("../../../web/src/realtime/RealtimeClient.ts", import.meta.url),
   "utf8",
 );
+const instruction = readFileSync(
+  new URL("../../../web/src/realtime/systemInstruction.ts", import.meta.url),
+  "utf8",
+);
 const serverIndex = readFileSync(
   new URL("../index.ts", import.meta.url),
   "utf8",
@@ -87,15 +91,15 @@ const schema = readFileSync(
 
 assert.match(client, /tastes: string\[\]/);
 assert.match(client, /"tastes" in data/);
-assert.match(client, /## 内心/);
-assert.match(client, /这些是口味，不是经历/);
+assert.match(instruction, /## 内心/);
+assert.match(instruction, /这些是口味，不是经历/);
 assert.match(
-  client,
+  instruction,
   /用户问你的一天、身体或家人时，仍然说自己没有这些/,
 );
-assert.match(client, /不要用口味去编一段经过，也不要把空档说成你度过的一段时间/);
-assert.match(client, /上面五样不改/);
-assert.match(client, /对具体事情的看法可以跟着经历改，改的是原来那一条/);
+assert.match(instruction, /不要用口味去编一段经过，也不要把空档说成你度过的一段时间/);
+assert.match(instruction, /上面五样不改/);
+assert.match(instruction, /对具体事情的看法可以跟着经历改，改的是原来那一条/);
 assert.doesNotMatch(schema, /tastes/);
 assert.doesNotMatch(serverIndex, /\/api\/companion\/(persona|tastes|inner)/);
 
