@@ -91,6 +91,11 @@ export class AffectStore {
     return this.read().firstSeenAt;
   }
 
+  /** 上次语音连上时记下的时间。不改库。 */
+  peekLastSeen(): string {
+    return this.read().lastSeenAt;
+  }
+
   private read(): AffectRow {
     const existing = db
       .select()

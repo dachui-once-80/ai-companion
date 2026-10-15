@@ -6,8 +6,9 @@
  */
 
 import { REUNION_GAP_MS } from "../affect/affect";
+import { contentKey } from "../memory/openMemory";
 import type { ClosenessTier } from "./closeness";
-import { inventsCompanionLife } from "./ThoughtStore";
+import { inventsCompanionLife, subjectKey } from "./ThoughtStore";
 
 /** 常聊只接这么近还留着的事。再早的，等对方聊到再接。 */
 export const RECENT_MATTER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,15 +54,43 @@ export type ReunionDate = {
   label: string;
 };
 
+export type MatterRef = {
+  key: string;
+  revision: string;
+};
+
 export type ReunionOpening = {
   apart: boolean;
   matter: string | null;
   cue: string;
+  matterKey: string | null;
+  matterRevision: string | null;
 };
+
+export function hangingRef(
+  kind: HangingKind,
+  about: string,
+  content: string,
+): MatterRef {
+  return {
+    key: `${kind}:${subjectKey(about)}`,
+    revision: contentKey(content),
+  };
+}
+
+export function dateRef(date: string, label: string): MatterRef {
+  const labelKey = contentKey(label);
+
+  return {
+    key: `date:${date}:${labelKey}`,
+    revision: `${date}:${labelKey}`,
+  };
+}
 
 type Picked = {
   kind: HangingKind | "date";
   text: string;
+  ref: MatterRef;
 };
 
 export function buildReunionOpening(input: {
@@ -72,9 +101,17 @@ export function buildReunionOpening(input: {
   questions: readonly ReunionMatter[];
   promises: readonly ReunionMatter[];
   dates: readonly ReunionDate[];
+  /** 已经留过或说过的同一版本。开场换下一件，没有就只打招呼。 */
+  skip?: readonly MatterRef[];
 }): ReunionOpening {
   if (!apartLongEnough(input.lastSeenAt, input.nowMs)) {
-    return { apart: false, matter: null, cue: "" };
+    return {
+      apart: false,
+      matter: null,
+      cue: "",
+      matterKey: null,
+      matterRevision: null,
+    };
   }
 
   const picked = pickOne(input);
@@ -84,6 +121,8 @@ export function buildReunionOpening(input: {
     apart: true,
     matter,
     cue: reunionCue(input.tier, picked),
+    matterKey: picked?.ref.key ?? null,
+    matterRevision: picked?.ref.revision ?? null,
   };
 }
 
@@ -94,27 +133,34 @@ function pickOne(input: {
   questions: readonly ReunionMatter[];
   promises: readonly ReunionMatter[];
   dates: readonly ReunionDate[];
+  skip?: readonly MatterRef[];
 }): Picked | null {
   if (input.tier === "刚认识") return null;
 
-  const hanging = pickHanging(input.tier, input.nowMs, [
-    ...tagged("unresolved", input.unresolved),
-    ...tagged("question", input.questions),
-    ...tagged("promise", input.promises),
-  ]);
+  const hanging = pickHanging(
+    input.tier,
+    input.nowMs,
+    [
+      ...tagged("unresolved", input.unresolved),
+      ...tagged("question", input.questions),
+      ...tagged("promise", input.promises),
+    ],
+    input.skip,
+  );
 
   if (hanging) {
     return {
       kind: hanging.kind,
       text: renderMatter(KIND_LABEL[hanging.kind], hanging.about, hanging.content),
+      ref: hangingRef(hanging.kind, hanging.about, hanging.content),
     };
   }
 
-  const date = pickDate(input.dates, new Date(input.nowMs));
+  const date = pickDate(input.dates, new Date(input.nowMs), input.skip);
 
   if (!date) return null;
 
-  return { kind: "date", text: date };
+  return { kind: "date", text: date.text, ref: date.ref };
 }
 
 function tagged(
@@ -134,6 +180,7 @@ function pickHanging(
   tier: ClosenessTier,
   nowMs: number,
   items: Array<ReunionMatter & { kind: HangingKind }>,
+  skip: readonly MatterRef[] | undefined,
 ): (ReunionMatter & { kind: HangingKind }) | null {
   const pool =
     tier === "常聊"
@@ -146,23 +193,41 @@ function pickHanging(
       KIND_RANK[a.kind] - KIND_RANK[b.kind],
   );
 
-  return pool[0] ?? null;
+  return (
+    pool.find(
+      (item) => !isSkipped(hangingRef(item.kind, item.about, item.content), skip),
+    ) ?? null
+  );
 }
 
-function pickDate(dates: readonly ReunionDate[], now: Date): string | null {
-  let best: { days: number; text: string } | null = null;
+function pickDate(
+  dates: readonly ReunionDate[],
+  now: Date,
+  skip: readonly MatterRef[] | undefined,
+): { text: string; ref: MatterRef } | null {
+  const near: Array<{ days: number; text: string; ref: MatterRef }> = [];
 
   for (const item of dates) {
     const days = daysUntilImportant(item, now);
 
     if (days === null) continue;
 
-    const text = renderDate(item.label, days);
-
-    if (!best || days < best.days) best = { days, text };
+    near.push({
+      days,
+      text: renderDate(item.label, days),
+      ref: dateRef(item.date, item.label.trim()),
+    });
   }
 
-  return best?.text ?? null;
+  near.sort((a, b) => a.days - b.days);
+
+  return near.find((item) => !isSkipped(item.ref, skip)) ?? null;
+}
+
+function isSkipped(ref: MatterRef, skip: readonly MatterRef[] | undefined): boolean {
+  if (!skip || skip.length === 0) return false;
+
+  return skip.some((item) => item.key === ref.key && item.revision === ref.revision);
 }
 
 function reunionCue(tier: ClosenessTier, picked: Picked | null): string {

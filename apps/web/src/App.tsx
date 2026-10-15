@@ -114,6 +114,10 @@ function App() {
   >("current");
   const [notice, setNotice] = useState("");
   const notifiedReminderIds = useRef<Set<string>>(new Set());
+  const [leftNote, setLeftNote] = useState<{
+    text: string;
+    leftAt: string;
+  } | null>(null);
 
   const appendLine = useCallback((speaker: string, text: string) => {
     const previous = linesRef.current;
@@ -301,6 +305,58 @@ function App() {
     const timer = window.setInterval(() => {
       void checkReminders();
     }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadLeftNote = async () => {
+      try {
+        const response = await fetch("/api/companion/aside");
+
+        if (!response.ok) return;
+
+        const data: unknown = await response.json();
+
+        if (!active) return;
+
+        const aside =
+          data &&
+          typeof data === "object" &&
+          "aside" in data &&
+          data.aside &&
+          typeof data.aside === "object"
+            ? data.aside
+            : null;
+
+        if (
+          aside &&
+          "text" in aside &&
+          typeof aside.text === "string" &&
+          aside.text.trim() &&
+          "leftAt" in aside &&
+          typeof aside.leftAt === "string"
+        ) {
+          setLeftNote({ text: aside.text.trim(), leftAt: aside.leftAt });
+          return;
+        }
+
+        setLeftNote(null);
+      } catch (error) {
+        console.warn("[Aside] load failed:", error);
+      }
+    };
+
+    void loadLeftNote();
+
+    const timer = window.setInterval(() => {
+      void loadLeftNote();
+    }, 15_000);
 
     return () => {
       active = false;
@@ -679,6 +735,13 @@ function App() {
 
           <div className="transcript-box">
             <span className="transcript-label">最近的对话</span>
+            {leftNote ? (
+              <div className="left-note">
+                <span className="transcript-label">她留下的</span>
+                <p>{leftNote.text}</p>
+                <span className="left-note-time">{formatDate(leftNote.leftAt)}</span>
+              </div>
+            ) : null}
             {lines.length === 0 ? (
               <p className="transcript-line">呼叫阿七，开始你们的对话吧。</p>
             ) : (

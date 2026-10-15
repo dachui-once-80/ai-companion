@@ -442,6 +442,45 @@ function readReunionCue(data: unknown): string {
   return opening.cue.trim();
 }
 
+function readLeftNote(data: unknown): { text: string; leftAt: string } | null {
+  if (typeof data !== "object" || data === null || !("aside" in data)) return null;
+
+  const aside = data.aside;
+
+  if (typeof aside !== "object" || aside === null) return null;
+  if (!("text" in aside) || typeof aside.text !== "string") return null;
+  if (!("leftAt" in aside) || typeof aside.leftAt !== "string") return null;
+
+  const text = aside.text.trim();
+  const leftAt = aside.leftAt.trim();
+
+  if (!text || !leftAt) return null;
+
+  return { text, leftAt };
+}
+
+function leftNoteBlock(text: string, leftAt: string): string {
+  const line = text.trim();
+
+  if (!line) return "";
+
+  return `
+## 你不在时留下的话
+下面这句是你已经留下的，对方打开页面就能看见。留下的时间：${formatLeftAt(leftAt)}。
+「${line}」
+这句算你已经说过。不要再主动念一遍，也不要换个说法把同一件再说成开场。只有对方接着问这句，才接下去。
+不要编你的身体，也不要编这段空档里你做了什么。
+`;
+}
+
+function formatLeftAt(iso: string): string {
+  const date = new Date(iso);
+
+  if (Number.isNaN(date.getTime())) return iso;
+
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
 function readCloseness(data: unknown): string {
   if (
     typeof data === "object" &&
@@ -623,6 +662,8 @@ export class RealtimeClient {
   // 隔了三个小时以上才有。对方还没开口时，用这一则让她先说一句。
   private reunionCue = "";
   private reunionCued = false;
+  // 人没连上时她留下的那一句。连上之后算已经说过，不要再念。
+  private leftNote: { text: string; leftAt: string } | null = null;
 
   // 服务端已经宣告这一轮结束。打断时只清本地队列，不影响下一轮回答。
   private playbackTurnSettled = false;
@@ -750,6 +791,7 @@ export class RealtimeClient {
       let viewContext = "还没有。";
       let unresolvedContext = "还没有。";
       let questionContext = "还没有。";
+      this.leftNote = null;
 
       const [memoryResult, affectResult, thoughtResult] = await Promise.all([
         this.loadMemoryContext(),
@@ -768,6 +810,7 @@ export class RealtimeClient {
         closenessContext = affectResult.closeness;
         this.reunionCue = affectResult.openingCue;
         this.reunionCued = false;
+        this.leftNote = affectResult.leftNote;
       }
 
       this.heldViews = thoughtResult?.viewItems ?? [];
@@ -834,6 +877,8 @@ export class RealtimeClient {
                   questionContext,
                   describeSessionTime(new Date(), lastSeenAt),
                   closenessContext,
+                  this.leftNote?.text ?? "",
+                  this.leftNote?.leftAt ?? "",
                 ),
               },
             ],
@@ -1596,6 +1641,7 @@ export class RealtimeClient {
     lastSeenAt: string | null;
     closeness: string;
     openingCue: string;
+    leftNote: { text: string; leftAt: string } | null;
   } | null> {
     try {
       const response = await fetch("/api/affect/resume", { method: "POST" });
@@ -1620,6 +1666,7 @@ export class RealtimeClient {
         lastSeenAt: affect.lastSeenAt,
         closeness: readCloseness(data),
         openingCue: readReunionCue(data),
+        leftNote: readLeftNote(data),
       };
     } catch (error) {
       console.warn("[Affect] resume failed:", error);
@@ -2022,6 +2069,8 @@ export class RealtimeClient {
     questionContext: string,
     timeContext: string,
     closenessContext: string,
+    asideText: string,
+    asideLeftAt: string,
   ): string {
     return `
 你是一个私人 AI Companion，名字是「${identity.currentName}」。
@@ -2052,7 +2101,7 @@ ${timeContext}
 很晚或一大清早，把句子收短，语气跟着钟点。人设不变。不要因此编你睡没睡、起没起。
 用户问昨天、前几天时，按记忆里的日期对。对不上就说不记得。
 隔了三个小时带来的心情变化只负责语气温度，不负责开口内容。
-
+${leftNoteBlock(asideText, asideLeftAt)}
 ## 情绪与陪伴
 下面是同一个人遇到不同的事时怎么接，不是另一套性格。
 先理解用户的情境、情绪和实际需求，再决定如何回应。
@@ -3868,6 +3917,7 @@ scope 规则：
     this.pendingFloor = null;
     this.reunionCue = "";
     this.reunionCued = false;
+    this.leftNote = null;
     this.playbackTail = Promise.resolve();
     this.asideSources.clear();
     this.currentUserText = "";

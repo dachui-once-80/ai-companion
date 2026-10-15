@@ -1,4 +1,5 @@
 import {
+  primaryKey,
   real,
   sqliteTable,
   text,
@@ -49,6 +50,32 @@ export const companionThoughts = sqliteTable("companion_thoughts", {
   about: text("about").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const companionAsides = sqliteTable("companion_asides", {
+  id: text("id").primaryKey(),
+  body: text("body").notNull(),
+  leftAt: text("left_at").notNull(),
+  matterKey: text("matter_key").notNull(),
+  matterRevision: text("matter_revision").notNull(),
+  heard: text("heard").notNull().default("false"),
+});
+
+export const companionAsideSpoken = sqliteTable(
+  "companion_aside_spoken",
+  {
+    matterKey: text("matter_key").notNull(),
+    matterRevision: text("matter_revision").notNull(),
+    spokenAt: text("spoken_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.matterKey, table.matterRevision] }),
+  ],
+);
+
+export const companionVoice = sqliteTable("companion_voice", {
+  id: text("id").primaryKey(),
+  leftAt: text("left_at").notNull(),
 });
 
 export const tasks = sqliteTable("tasks", {

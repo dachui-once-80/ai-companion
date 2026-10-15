@@ -4,6 +4,7 @@ import {
   buildReunionOpening,
   DATE_NEAR_DAYS,
   daysUntilImportant,
+  hangingRef,
   RECENT_MATTER_MS,
   type ReunionDate,
   type ReunionMatter,
@@ -28,6 +29,7 @@ function open(input: {
   questions?: ReunionMatter[];
   promises?: ReunionMatter[];
   dates?: ReunionDate[];
+  skip?: ReturnType<typeof hangingRef>[];
 }) {
   return buildReunionOpening({
     nowMs: now,
@@ -42,6 +44,7 @@ function open(input: {
     questions: input.questions ?? [],
     promises: input.promises ?? [],
     dates: input.dates ?? [],
+    skip: input.skip,
   });
 }
 
@@ -118,6 +121,23 @@ for (const opening of [greeted, recent, familiarDate, closeHang, closeDate, skip
   assert.match(opening.cue, /分开了多久不是要讲的事/);
   assert.doesNotMatch(opening.cue, /又见面了/);
 }
+
+const alreadySaid = open({
+  tier: "很熟",
+  unresolved: [interview],
+  questions: [olderQuestion],
+  skip: [hangingRef("unresolved", "面试", "结果还没出来")],
+});
+assert.equal(alreadySaid.matter, "没问完的问题：那只猫，后来找到了吗");
+assert.doesNotMatch(alreadySaid.cue, /面试/);
+
+const saidAll = open({
+  tier: "很熟",
+  unresolved: [interview],
+  skip: [hangingRef("unresolved", "面试", "结果还没出来")],
+});
+assert.equal(saidAll.matter, null);
+assert.match(saidAll.cue, /只打招呼/);
 
 assert.equal(
   daysUntilImportant({ date: "10-16", yearly: false, label: "考试" }, new Date(now)),

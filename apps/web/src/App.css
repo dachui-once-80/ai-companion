@@ -732,6 +732,26 @@ input:focus-visible {
   font-size: 11px;
 }
 
+.left-note {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #ffffff10;
+}
+
+.left-note p {
+  margin: 8px 0 0;
+  color: #efeaf8;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.left-note-time {
+  display: block;
+  margin-top: 6px;
+  color: #8f87a8;
+  font-size: 11px;
+}
+
 .transcript-box p,
 .transcript-line {
   margin: 8px 0 0;

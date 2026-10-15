@@ -10,6 +10,8 @@ import {
   parseModelAppraisal,
 } from "./affect/appraiseModel";
 import { resolveCloseness } from "./companion/closeness";
+import { asideStore } from "./companion/AsideStore";
+import { decideAside } from "./companion/aside";
 import { buildReunionOpening } from "./companion/reunion";
 import { Companion } from "./companion/Companion";
 import { holdSessionView } from "./companion/sessionView";
@@ -833,8 +835,10 @@ app.delete("/api/tasks/:id", (req, res) => {
  * =========================================================
  */
 
-// 每 15 秒检查一次是否有到期提醒
+// 每 15 秒检查一次是否有到期提醒，以及人没在语音里时要不要留一句话
 let reminderCheckRunning = false;
+let asideCheckRunning = false;
+let voiceSessions = 0;
 
 async function checkTaskReminders() {
   if (reminderCheckRunning) return;
@@ -881,10 +885,58 @@ async function checkTaskReminders() {
   }
 }
 
+function checkAside() {
+  if (asideCheckRunning) return;
+
+  asideCheckRunning = true;
+
+  try {
+    const pending = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.status, "pending"))
+      .all();
+    const current = asideStore.current();
+    const choice = decideAside({
+      nowMs: Date.now(),
+      voiceOpen: voiceSessions > 0,
+      awayAt: asideStore.awayAt() ?? affectStore.peekLastSeen(),
+      unheard: current !== null && !current.heard,
+      unresolved: thoughtStore.list("unresolved"),
+      questions: thoughtStore.list("question"),
+      promises: memoryManager.listPromises(),
+      dates: memoryManager.listImportantDates(),
+      dues: pending.map((task) => ({
+        id: task.id,
+        title: task.title,
+        dueAt: task.dueAt,
+        reminderAt: task.reminderAt,
+      })),
+      spoken: asideStore.spoken(),
+    });
+
+    if (!choice) return;
+
+    asideStore.leave({
+      text: choice.text,
+      leftAt: new Date().toISOString(),
+      matterKey: choice.matterKey,
+      matterRevision: choice.matterRevision,
+    });
+    console.log("[Aside] left", choice.matterKey);
+  } catch (error) {
+    console.error("[Aside] check failed:", error);
+  } finally {
+    asideCheckRunning = false;
+  }
+}
+
 // 启动时检查一次，之后每 15 秒检查
 void checkTaskReminders();
+checkAside();
 setInterval(() => {
   void checkTaskReminders();
+  checkAside();
 }, 15_000);
 
 const server = http.createServer(app);
@@ -932,6 +984,24 @@ server.on("upgrade", (request, socket, head) => {
   const upstreamUrl = `${GEMINI_WS_ORIGIN}${upstreamPath}`;
 
   liveProxyWss.handleUpgrade(request, socket, head, (client) => {
+    voiceSessions += 1;
+    let voiceEnded = false;
+    const endVoice = () => {
+      if (voiceEnded) return;
+
+      voiceEnded = true;
+      voiceSessions = Math.max(0, voiceSessions - 1);
+
+      if (voiceSessions > 0) return;
+
+      try {
+        asideStore.setAwayAt(new Date().toISOString());
+      } catch (error) {
+        console.error("[Aside] failed to note voice left:", error);
+      }
+    };
+    client.on("close", endVoice);
+
     const pending: Array<{
       data: WebSocket.RawData;
       isBinary: boolean;
@@ -1220,6 +1290,19 @@ app.post("/api/companion/session-view", (req, res) => {
   res.json(result);
 });
 
+app.get("/api/companion/aside", (_req, res) => {
+  try {
+    const aside = asideStore.current();
+
+    res.json({
+      aside: aside ? { text: aside.text, leftAt: aside.leftAt } : null,
+    });
+  } catch (error) {
+    console.error("[Aside] read failed:", error);
+    res.status(500).json({ error: "Failed to read aside" });
+  }
+});
+
 app.post("/api/affect/resume", (_req, res) => {
   try {
     const affect = affectStore.resume();
@@ -1229,6 +1312,11 @@ app.post("/api/affect/resume", (_req, res) => {
       warmth: affectStore.peekWarmth(),
       memories: memoryStore.getAll(),
     });
+    const currentAside = asideStore.current();
+
+    if (currentAside && !currentAside.heard) asideStore.markHeard();
+
+    asideStore.setAwayAt(new Date().toISOString());
 
     const opening = buildReunionOpening({
       nowMs: Date.now(),
@@ -1238,11 +1326,26 @@ app.post("/api/affect/resume", (_req, res) => {
       questions: thoughtStore.list("question"),
       promises: memoryManager.listPromises(),
       dates: memoryManager.listImportantDates(),
+      skip: currentAside
+        ? [
+            {
+              key: currentAside.matterKey,
+              revision: currentAside.matterRevision,
+            },
+          ]
+        : [],
     });
 
     console.log("[Closeness]", closeness.tier);
     console.log("[Reunion]", opening.apart, opening.matter ?? "(greet)");
-    res.json({ ...affect, closeness: closeness.text, opening });
+    res.json({
+      ...affect,
+      closeness: closeness.text,
+      opening,
+      aside: currentAside
+        ? { text: currentAside.text, leftAt: currentAside.leftAt }
+        : null,
+    });
   } catch (error) {
     console.error("[Affect] resume failed:", error);
     res.status(500).json({ error: "Failed to resume affect" });
