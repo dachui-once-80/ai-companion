@@ -1,4 +1,4 @@
-export type OpenMemoryCategory = "episode" | "impression" | "note";
+export type OpenMemoryCategory = "episode" | "impression" | "note" | "between";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
@@ -8,7 +8,8 @@ export function isOpenCategory(
   return (
     category === "episode" ||
     category === "impression" ||
-    category === "note"
+    category === "note" ||
+    category === "between"
   );
 }
 

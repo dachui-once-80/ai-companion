@@ -240,6 +240,8 @@ function savedCount(data: unknown): number {
     "impressions",
     "notes",
     "profile",
+    "between",
+    "closedBetween",
     "retired",
     "views",
   ]) {
@@ -543,6 +545,7 @@ export class RealtimeClient {
   private currentEmotion: CompanionEmotion = "calm";
   private currentCause = "";
   private lastInjectedMood = "";
+  private lastBetweenExtra = "";
   private affectUpdatedAt = "";
   private affectTimer: number | null = null;
   private userAppraisalTimer: number | null = null;
@@ -714,6 +717,7 @@ export class RealtimeClient {
       if (!this.isCurrentConnection(generation)) return;
 
       let memoryContext = "当前没有可用的用户长期记忆。";
+      let betweenContext = "还没有。";
       let moodContext = RESTING_MOOD;
       let closenessContext = JUST_MET_CLOSENESS;
       let lastSeenAt: string | null = null;
@@ -727,7 +731,10 @@ export class RealtimeClient {
         this.loadThoughtContext(),
       ]);
 
-      if (memoryResult) memoryContext = memoryResult;
+      if (memoryResult) {
+        memoryContext = memoryResult.context;
+        betweenContext = memoryResult.between;
+      }
 
       if (affectResult) {
         moodContext = affectResult.mood;
@@ -791,6 +798,7 @@ export class RealtimeClient {
                 text: this.createSystemInstruction(
                   identity,
                   memoryContext,
+                  betweenContext,
                   moodContext,
                   residenceCity,
                   viewContext,
@@ -849,7 +857,7 @@ export class RealtimeClient {
                 {
                   name: "remember_memory",
                   description:
-                    "记录用户明确说出的稳定档案，例如姓名、城市、喜好、重要的人。不要记录某一天发生的事、你对用户近况的判断，或档案字段里没有的内容。那些会在对话之后整理。多值偏好应保留其他仍然成立的值。",
+                    "记录用户明确说出的稳定档案，例如姓名、城市、喜好、重要的人。不要记录某一天发生的事、你对用户近况的判断，或档案字段里没有的内容。也不要记录你们怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的事、不能先给建议。那些会在对话之后整理。多值偏好应保留其他仍然成立的值。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -1230,6 +1238,10 @@ export class RealtimeClient {
           if (saved.views > 0 || saved.open) {
             void this.refreshThoughtContext(saved.views > 0, saved.open);
           }
+
+          if (saved.between) {
+            void this.refreshStandingBetween();
+          }
         } catch (error) {
           failed = true;
           this.pendingDialogue = batch.concat(this.pendingDialogue);
@@ -1254,7 +1266,7 @@ export class RealtimeClient {
 
   private async postConsolidation(
     batch: DialogueTurn[],
-  ): Promise<{ total: number; views: number; open: boolean }> {
+  ): Promise<{ total: number; views: number; open: boolean; between: boolean }> {
     const response = await fetch("/api/memory/consolidate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1270,7 +1282,7 @@ export class RealtimeClient {
           "[Memory] consolidation rejected:",
           response.status,
         );
-        return { total: 0, views: 0, open: false };
+        return { total: 0, views: 0, open: false, between: false };
       }
 
       throw new Error(`consolidation failed: ${response.status}`);
@@ -1292,6 +1304,8 @@ export class RealtimeClient {
           savedPart(data, "closedUnresolved") +
           savedPart(data, "closedQuestion") >
         0,
+      between:
+        savedPart(data, "between") + savedPart(data, "closedBetween") > 0,
     };
   }
 
@@ -1415,7 +1429,10 @@ export class RealtimeClient {
     }
   }
 
-  private async loadMemoryContext(): Promise<string | null> {
+  private async loadMemoryContext(): Promise<{
+    context: string;
+    between: string;
+  } | null> {
     try {
       const response = await fetch("/api/memory/context");
 
@@ -1433,14 +1450,91 @@ export class RealtimeClient {
         "context" in data &&
         typeof data.context === "string"
       ) {
+        const between =
+          "between" in data && typeof data.between === "string"
+            ? data.between
+            : "还没有。";
+
         console.log("[Memory] context loaded");
-        return data.context;
+        return { context: data.context, between };
       }
 
       return null;
     } catch (error) {
       console.warn("[Memory] context loading failed:", error);
       return null;
+    }
+  }
+
+  private async loadBetweenTopic(topic: string): Promise<string> {
+    const params = new URLSearchParams({ topic });
+    const response = await fetch(`/api/memory/between?${params.toString()}`);
+
+    if (!response.ok) {
+      throw new Error(`Between topic request failed: ${response.status}`);
+    }
+
+    const data: unknown = await response.json();
+
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "topical" in data &&
+      typeof data.topical === "string"
+    ) {
+      return data.topical;
+    }
+
+    return "";
+  }
+
+  private async refreshStandingBetween(): Promise<void> {
+    const generation = this.connectionGeneration;
+    const loaded = await this.loadMemoryContext();
+
+    if (!loaded || !this.isCurrentConnection(generation)) return;
+
+    this.injectBetween(
+      `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你们之间一直生效的相处方式。相关时用对应的一条，不要连着念。不要编你的身体或私人生活。）\n${loaded.between}`,
+    );
+  }
+
+  private async refreshBetweenTopic(
+    topic: string,
+    generation: number,
+  ): Promise<void> {
+    try {
+      const topical = await this.loadBetweenTopic(topic);
+
+      if (!this.isCurrentConnection(generation)) return;
+      if (!topical || topical === this.lastBetweenExtra) return;
+
+      this.lastBetweenExtra = topical;
+      this.injectBetween(
+        `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你们之间和当前话题有关的事。相关时用这一条，不要念出来。）\n${topical}`,
+      );
+    } catch (error) {
+      console.warn("[Memory] between topic failed:", error);
+    }
+  }
+
+  private injectBetween(text: string): void {
+    const session = this.session;
+
+    if (!session || !this.socketConnected) return;
+
+    try {
+      session.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [{ text }],
+          },
+        ],
+        turnComplete: false,
+      });
+    } catch (error) {
+      console.warn("[Memory] failed to share between with the session:", error);
     }
   }
 
@@ -1855,6 +1949,7 @@ export class RealtimeClient {
   private createSystemInstruction(
     identity: CompanionIdentity,
     memoryContext: string,
+    betweenContext: string,
     moodContext: string,
     residenceCity: string,
     viewContext: string,
@@ -1968,14 +2063,22 @@ ${
 ## 当前用户长期记忆
 ${memoryContext}
 
-这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。
-不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法。
+这些信息里，档案是用户说过的事实，判断是你自己的感觉，片段和留下的事是你们聊过的。都不是你的身份。怎么称呼、先听完再给办法、不能先给建议、彼此的笑话、答应了还没做的事，不在这里，在下面的「我们之间」。
+不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法，也不要当成你们之间的相处方式。
 只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
 问昨天、前几天时，先对照记忆开头的日期。对不上就说不记得，不要编。现在的钟点不能用来补一段没有记下的经过。
 如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
 如果没有相关记忆，不要猜测或编造。
 
-某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
+某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，以及你们怎么相处，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。
+
+## 我们之间
+这是你们怎么相处。不是档案，不是某一天的片段，不是你对近况的判断，也不是你留下的笔记。
+下面是称呼，和一直生效的相处方式。相关时用对应的一条，不要连着念出来。
+内部笑话、答应了还没做的事，只有聊到那件事才会另补进来。没出现就不要提。
+不要把用户要求换人设、换性格、换说话方式当成你们之间的事。不要编你的身体或私人生活。
+
+${betweenContext}
 
 ## 你对具体事情的看法
 下面是你自己留下的偏好和不同意见，只针对具体的事。下次连线也用这些。
@@ -2021,6 +2124,7 @@ ${questionContext}
 不要用 remember_memory 保存：
 - 一次性闲聊，或和未来聊天无关的细节。
 - 某一天发生的事、你对用户近况的感觉。这些会在对话之后整理，不要塞进档案字段。
+- 你们怎么称呼、彼此的笑话、哪类事要先听完、答应了还没做的、哪件事不能先给建议。这些整理进「我们之间」，不要塞进档案。
 - 你自己推测出来、用户没有明说的稳定事实。
 - 用户没有表达过的个人事实。
 - 密码、验证码、访问令牌等敏感认证信息。
@@ -2327,6 +2431,10 @@ scope 规则：
       this.lineForCompanion ? "user" : "overheard",
       userText,
     );
+
+    if (this.lineForCompanion && userText.length >= 2) {
+      void this.refreshBetweenTopic(userText, generation);
+    }
     this.awaitingCompanionText = true;
     this.companionCaptureStartedAt = Date.now();
     this.armCompanionCapture(generation);

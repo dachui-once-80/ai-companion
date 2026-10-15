@@ -4,6 +4,14 @@ import {
   subjectKey,
   type ThoughtStore,
 } from "../companion/ThoughtStore";
+import {
+  blocksProfileName,
+  classifyBetweenNote,
+  isBetweenKind,
+  rejectedBetween,
+  sameMemoryText,
+  type BetweenKind,
+} from "./between";
 import type { MemoryManager } from "./MemoryManager";
 import { getMemoryCategory, isValidMemoryKey, listMemoryKeys } from "./MemoryPolicy";
 import type { MemoryImportance } from "./MemoryTypes";
@@ -27,6 +35,8 @@ export type ConsolidationResult = {
     impressions: number;
     notes: number;
     profile: number;
+    between: number;
+    closedBetween: number;
     retired: number;
     views: number;
     unresolved: number;
@@ -47,6 +57,8 @@ type ConsolidationPlan = {
   retireImpressions: string[];
   notes: Array<PlannedItem & { label: string }>;
   profile: Array<PlannedItem & { key: string }>;
+  between: Array<PlannedItem & { kind: BetweenKind; about: string }>;
+  resolveBetween: Array<{ kind: BetweenKind; about: string }>;
   views: Array<{ about: string; content: string }>;
   unresolved: Array<{ about: string; content: string }>;
   resolveUnresolved: string[];
@@ -54,6 +66,7 @@ type ConsolidationPlan = {
   resolveQuestion: string[];
 };
 
+const MAX_BETWEEN = 6;
 const MAX_TURNS = 40;
 const MAX_TURN_CHARS = 2_000;
 const MAX_TOTAL_CHARS = 12_000;
@@ -115,6 +128,36 @@ export const consolidationResponseSchema = {
         required: ["key", "content", "importance"],
       },
     },
+    between: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["address", "joke", "listen", "promise", "hold"],
+          },
+          about: { type: "string" },
+          content: { type: "string" },
+          importance: { type: "string", enum: ["low", "medium", "high"] },
+        },
+        required: ["kind", "about", "content", "importance"],
+      },
+    },
+    resolveBetween: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["address", "joke", "listen", "promise", "hold"],
+          },
+          about: { type: "string" },
+        },
+        required: ["kind", "about"],
+      },
+    },
     views: {
       type: "array",
       items: {
@@ -163,6 +206,8 @@ export const consolidationResponseSchema = {
     "retireImpressions",
     "notes",
     "profile",
+    "between",
+    "resolveBetween",
     "views",
     "unresolved",
     "resolveUnresolved",
@@ -245,6 +290,7 @@ export function parseConsolidationResult(
   const impressions: ConsolidationPlan["impressions"] = [];
   const notes: ConsolidationPlan["notes"] = [];
   const profile: ConsolidationPlan["profile"] = [];
+  const betweenByKey = new Map<string, ConsolidationPlan["between"][number]>();
   const viewsBySubject = new Map<string, { about: string; content: string }>();
   const retireImpressions: string[] = [];
 
@@ -303,6 +349,48 @@ export function parseConsolidationResult(
     });
   }
 
+  for (const item of asObjects(record.between).slice(0, MAX_BETWEEN)) {
+    const kind = readString(item.kind) ?? "";
+    const about = readSubject(item.about);
+    const content = readContent(item.content);
+
+    if (!isBetweenKind(kind) || !about || !content) continue;
+    if (rejectedBetween(about, content)) continue;
+
+    betweenByKey.set(`${kind}:${subjectKey(about)}`, {
+      kind,
+      about,
+      content,
+      importance: readImportance(item.importance),
+    });
+  }
+
+  const keptNotes: ConsolidationPlan["notes"] = [];
+
+  for (const note of notes) {
+    const lifted = classifyBetweenNote(note.content);
+
+    if (lifted && !rejectedBetween(lifted.about, note.content)) {
+      const key = `${lifted.kind}:${subjectKey(lifted.about)}`;
+      const already = [...betweenByKey.values()].some((item) =>
+        sameMemoryText(item.content, note.content),
+      );
+
+      if (!already && !betweenByKey.has(key)) {
+        betweenByKey.set(key, {
+          kind: lifted.kind,
+          about: lifted.about,
+          content: note.content,
+          importance: note.importance,
+        });
+      }
+
+      continue;
+    }
+
+    keptNotes.push(note);
+  }
+
   for (const item of asObjects(record.views).slice(0, MAX_ITEMS)) {
     const about = readSubject(item.about);
     const content = readContent(item.content);
@@ -314,12 +402,18 @@ export function parseConsolidationResult(
   const unresolved = readOpenThought(record.unresolved);
   const question = readOpenThought(record.question);
 
+  const between = [...betweenByKey.values()].slice(0, MAX_BETWEEN);
+
   return {
     episodes,
     impressions,
     retireImpressions,
-    notes,
+    notes: keptNotes.filter(
+      (note) => !between.some((item) => sameMemoryText(note.content, item.content)),
+    ),
     profile,
+    between,
+    resolveBetween: readResolveBetween(record.resolveBetween),
     views: [...viewsBySubject.values()],
     unresolved,
     resolveUnresolved: readCloseSubjects(record.resolveUnresolved),
@@ -338,6 +432,8 @@ export function applyConsolidation(
     impressions: 0,
     notes: 0,
     profile: 0,
+    between: 0,
+    closedBetween: 0,
     retired: 0,
     views: 0,
     unresolved: 0,
@@ -346,7 +442,34 @@ export function applyConsolidation(
     closedQuestion: 0,
   };
 
+  for (const item of plan.between) {
+    if (rejectedBetween(item.about, item.content)) continue;
+
+    const result = memory.saveBetween(
+      item.kind,
+      item.about,
+      item.content,
+      item.importance,
+    );
+
+    if (result.action !== "unchanged") saved.between += 1;
+  }
+
+  for (const item of plan.resolveBetween) {
+    const rewritten = plan.between.some(
+      (kept) =>
+        kept.kind === item.kind &&
+        subjectKey(kept.about) === subjectKey(item.about),
+    );
+
+    if (rewritten) continue;
+
+    saved.closedBetween += memory.retireBetween(item.kind, item.about);
+  }
+
   for (const episode of plan.episodes) {
+    if (overlapsBetween(episode.content, plan.between)) continue;
+
     const result = memory.saveEpisode(
       episode.date,
       episode.content,
@@ -357,6 +480,8 @@ export function applyConsolidation(
   }
 
   for (const impression of plan.impressions) {
+    if (overlapsBetween(impression.content, plan.between)) continue;
+
     const result = memory.saveImpression(
       impression.theme,
       impression.content,
@@ -376,6 +501,8 @@ export function applyConsolidation(
   }
 
   for (const note of plan.notes) {
+    if (overlapsBetween(note.content, plan.between)) continue;
+
     const result = memory.saveNote(
       note.label,
       note.content,
@@ -386,6 +513,8 @@ export function applyConsolidation(
   }
 
   for (const item of plan.profile) {
+    if (overlapsBetween(item.content, plan.between, item.key)) continue;
+
     const result = memory.remember({
       key: item.key,
       category: getMemoryCategory(item.key),
@@ -480,6 +609,7 @@ export async function consolidateConversation(options: {
     buildPrompt(
       today,
       options.memory.describeForReview(),
+      options.memory.describeBetween(),
       options.thoughts.describeViews(),
       options.thoughts.describeOpen("unresolved"),
       options.thoughts.describeOpen("question"),
@@ -501,6 +631,7 @@ function turnLabel(role: DialogueTurn["role"]): string {
 function buildPrompt(
   today: string,
   known: string,
+  betweenKnown: string,
   views: string,
   unresolved: string,
   questions: string,
@@ -524,6 +655,9 @@ function buildPrompt(
 已经留下的记忆：
 ${known}
 
+你们之间已经记下的相处方式（同一条必须沿用原来的 kind 和 about，这样会改原来那一条）：
+${betweenKnown}
+
 她已经留下的看法（同一件事必须沿用原来的 about，这样会改原来那一条）：
 ${views}
 
@@ -538,30 +672,48 @@ ${transcript}
 
 「现场」不是用户在跟阿七说话。那是他转头跟别人说的，或旁边的人说的。不要把这些写成用户的档案、偏好或决定。值得留的话，写成当时身边发生的事，不要写成用户对阿七的倾诉。用户自己对阿七说的，才按原来的规则整理。
 
-只输出 JSON。十个字段都要在，可以是空数组：episodes、impressions、retireImpressions、notes、profile、views、unresolved、resolveUnresolved、question、resolveQuestion。
+只输出 JSON。十二个字段都要在，可以是空数组：episodes、impressions、retireImpressions、notes、profile、between、resolveBetween、views、unresolved、resolveUnresolved、question、resolveQuestion。
 
 episodes：聊过的具体事情。以后用户问「昨天发生了什么」「前几天怎么了」时用得上。
 - 写发生了什么，一两句话，不要写成聊天记录。
 - date 用 YYYY-MM-DD。说的是今天的事就用 ${today}。说的是昨天或更早，按今天推算。推不出就用 ${today}。
 - 问候、天气闲聊、复读，不要写。
 - 不要和已有片段重复。
+- 怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的、不能先给建议，不要写进片段。那些写进 between。
 
 impressions：她对用户近况的判断，不是用户填的档案。例如「用户最近一直在加班，压力不小」。
 - theme 用简短中文。同一件事沿用已有判断里的 theme，例如「加班」「压力」「睡眠」。
 - content 用她注意到的口气，一句，称呼用「用户」。这是她的感觉，不要写成用户确认过的事实。
 - 近况没变就不要再输出。变了就输出新的 content，同一 theme 的旧判断会被换掉。
 - 没有依据不要推断。
+- 怎么称呼、先听完、不能先给建议、笑话和还没做的约定，不要写成对近况的判断。
 
 retireImpressions：已有判断明显不再成立时，写下要收回的 theme。没有就空数组。
 
-notes：整段话里值得以后再提起，但不是某一天的事件，也不是对近况的判断，也对不上下面的档案字段。例如一个决定、一件还没发生但用户放在心上的事。
+notes：整段话里值得以后再提起，但不是某一天的事件，也不是对近况的判断，也对不上下面的档案字段，也不是你们怎么相处。例如一个决定、一件还没发生但用户放在心上的事。
 - label 用简短中文。
 - 不要和档案、片段、判断重复。
+- 怎么称呼、彼此的笑话、先听完再给办法、答应了还没做的、不能先给建议，不要写进 notes。那些只写 between。
 
 profile：只有用户在这段话里明确说出的稳定事实，而且 key 必须是下面之一。
 ${keys}
 - 没说出口的不要推断。假设、玩笑、转述别人、没说完的，不要写。
 - 和已有档案相同就不要写。没有把握就不要写。写错会盖掉旧的单值档案。
+- 用户规定你们怎么叫，不要写成 user_name。user_name 只在用户说出自己的姓名时写，例如「我叫张三」。
+
+between：只记你们之间怎么相处。和片段、判断、笔记、档案不要重复。同一句话只放这里。
+- kind 只能是 address、joke、listen、promise、hold。
+- address：怎么称呼对方。例如「她叫用户阿远」。about 用「叫用户」或「叫她」。用户报自己的姓名不要写这里。
+- joke：变成内部笑话的那一句。about 用那句的关键词，2 到 16 个字。
+- listen：哪一类事要先听完再给办法。about 用那一类，例如「烦心事」。
+- promise：答应过、还没做的事。about 用那件事。做完了放进 resolveBetween，不要留在这里。
+- hold：哪一件事不能先给建议。about 用那件事。
+- content 用一句。about 用简短中文，2 到 16 个字。同一条沿用上面已有的 kind 和 about。
+- 没变成相处方式的闲聊不要写。没有就空数组。
+- 用户要求她换人设、换性格、换说话方式，或扮演别人，不要写成 between。
+- 不要编她的身体或私人生活。
+
+resolveBetween：上面已有的相处方式不再成立，或答应的事做完了，只写下要收掉的 kind 和 about。没有就空数组。最多 6 条。不要把收掉的内容再写进 between。
 
 views：她对具体事情自己的偏好或不同意见。例如觉得某件事不值得，或更在意另一面。
 - about 用简短中文，指那件具体的事，2 到 16 个字。同一件事沿用上面已有看法里的 about，不要新开一条。
@@ -598,7 +750,46 @@ resolveQuestion：上面那条问题在这段话里问过、并且得到回答�
 
 都不要保存：密码、验证码、密钥、证件号、银行卡号，阿七的身体或私人生活，以及用户要求她换性格、换人设或扮演别人的话。
 
-importance 只用 low、medium、high。会反复影响以后怎么陪用户的用 high，其余用 medium 或 low。档案、片段、判断、笔记和看法每类最多 4 条。unresolved 和 question 最多各 1 条。`;
+importance 只用 low、medium、high。称呼和一直生效的相处方式用 high，其余用 medium 或 low。档案、片段、判断、笔记和看法每类最多 4 条。between 最多 6 条。unresolved 和 question 最多各 1 条。`;
+}
+
+function overlapsBetween(
+  content: string,
+  between: ConsolidationPlan["between"],
+  profileKey?: string,
+): boolean {
+  return between.some((item) => {
+    if (sameMemoryText(content, item.content)) return true;
+
+    return (
+      profileKey === "user_name" &&
+      item.kind === "address" &&
+      blocksProfileName(content, item.content)
+    );
+  });
+}
+
+function readResolveBetween(
+  value: unknown,
+): ConsolidationPlan["resolveBetween"] {
+  const items: ConsolidationPlan["resolveBetween"] = [];
+  const seen = new Set<string>();
+
+  for (const item of asObjects(value).slice(0, MAX_BETWEEN)) {
+    const kind = readString(item.kind) ?? "";
+    const about = readSubject(item.about);
+
+    if (!isBetweenKind(kind) || !about) continue;
+
+    const key = `${kind}:${subjectKey(about)}`;
+
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    items.push({ kind, about });
+  }
+
+  return items;
 }
 
 function isDisposableLookup(turns: DialogueTurn[]): boolean {
@@ -639,6 +830,8 @@ function emptyResult(): ConsolidationResult {
       impressions: 0,
       notes: 0,
       profile: 0,
+      between: 0,
+      closedBetween: 0,
       retired: 0,
       views: 0,
       unresolved: 0,

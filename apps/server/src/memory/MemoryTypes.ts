@@ -6,7 +6,8 @@ export type MemoryCategory =
   | "relationship"
   | "episode"
   | "impression"
-  | "note";
+  | "note"
+  | "between";
 
 export type MemoryImportance = "low" | "medium" | "high";
 

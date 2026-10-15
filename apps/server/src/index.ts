@@ -1315,6 +1315,7 @@ app.get("/api/memory/context", (_req, res) => {
   try {
     res.json({
       context: memoryManager.getContext(),
+      between: memoryManager.renderBetween(),
     });
   } catch (error) {
     console.error(
@@ -1325,6 +1326,19 @@ app.get("/api/memory/context", (_req, res) => {
     res.status(500).json({
       error: "Failed to generate memory context",
     });
+  }
+});
+
+app.get("/api/memory/between", (req, res) => {
+  const topic = typeof req.query.topic === "string" ? req.query.topic : "";
+
+  try {
+    res.json({
+      topical: memoryManager.renderBetweenTopic(topic),
+    });
+  } catch (error) {
+    console.error("[Memory] between context failed:", error);
+    res.status(500).json({ error: "Failed to read between" });
   }
 });
 
@@ -1400,6 +1414,8 @@ app.post("/api/memory/consolidate", async (req, res) => {
           impressions: 0,
           notes: 0,
           profile: 0,
+          between: 0,
+          closedBetween: 0,
           retired: 0,
           views: 0,
           unresolved: 0,

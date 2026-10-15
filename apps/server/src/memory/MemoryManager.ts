@@ -3,8 +3,19 @@ import {
     type RecallMemoryOptions,
     type RememberMemoryInput,
 } from "./MemoryStore";
+import {
+    betweenKey,
+    describeBetweenText,
+    parseBetweenKey,
+    renderBetweenText,
+    selectBetween,
+    isStandingKind,
+    type BetweenKind,
+    type BetweenRecord,
+} from "./between";
 import type { Memory, MemoryImportance } from "./MemoryTypes";
 import {
+    contentKey,
     formatToday,
     isOpenCategory,
     openId,
@@ -104,6 +115,7 @@ export class MemoryManager {
             "- 最近发生的事按日期理解。用户问昨天、前几天时，先对照今天的日期；没有记录就说不记得。",
             "- 你对用户的判断是你自己的感觉。可以轻轻带出来，不要当成用户确认过的资料。用户说的不一样，以现在说的为准。",
             "- 你决定留下的事是以后还用得上、又不适合放进档案的内容。",
+            "- 怎么称呼、先听完再给办法、不能先给建议、彼此的笑话、答应了还没做的事，不在这里。那些在「我们之间」。",
             "- 问更早的事，或上下文里没有的事，调用 recall_memory，用事情里的词去查，不要编档案 key。",
             "- 用户明确说出姓名、城市、喜好这类稳定事实时，用 remember_memory 写入对应档案。某一天的事、近况和你的感觉不要写进档案。",
             "- 不要编造这里没有的个人信息。",
@@ -112,6 +124,97 @@ export class MemoryManager {
 
     describeForReview(limit = 12): string {
         return this.renderSections(limit);
+    }
+
+    /**
+     * 下次连线用。称呼和一直生效的相处方式始终在。
+     * 笑话和还没做的约定，只有 topic 对得上才带。
+     */
+    renderBetween(topic = ""): string {
+        return renderBetweenText(selectBetween(this.currentBetween(), topic));
+    }
+
+    /** 连线中途，只补和当前这句话相关的笑话、未完成约定。 */
+    renderBetweenTopic(topic: string): string {
+        const extra = selectBetween(this.currentBetween(), topic).filter(
+            (item) => !isStandingKind(item.kind),
+        );
+
+        return extra.length === 0 ? "" : renderBetweenText(extra);
+    }
+
+    /** 整理时对照已有的相处方式，沿用原来的 kind 和 about。 */
+    describeBetween(): string {
+        const items = this.currentBetween()
+            .slice()
+            .sort(
+                (a, b) =>
+                    b.updatedAt.localeCompare(a.updatedAt) ||
+                    a.about.localeCompare(b.about),
+            )
+            .slice(0, 40);
+
+        return describeBetweenText(items);
+    }
+
+    saveBetween(
+        kind: BetweenKind,
+        about: string,
+        content: string,
+        importance: MemoryImportance,
+    ) {
+        const key = betweenKey(kind, about);
+        const normalized = contentKey(content);
+        const current = this.store
+            .findByCategory("between")
+            .filter((memory) => memory.status === "current");
+        const sameText = current.find(
+            (memory) => contentKey(memory.content) === normalized,
+        );
+
+        if (sameText && sameText.key !== key) {
+            return { action: "unchanged" as const, memory: sameText };
+        }
+
+        return this.store.saveCompanionMemory({
+            category: "between",
+            key,
+            content,
+            importance,
+            mode: "replace",
+        });
+    }
+
+    retireBetween(kind: BetweenKind, about: string): number {
+        return this.store.retireCompanionMemory(
+            "between",
+            betweenKey(kind, about),
+        );
+    }
+
+    private currentBetween(): BetweenRecord[] {
+        return this.store
+            .findByCategory("between")
+            .filter(
+                (memory) =>
+                    memory.status === "current" &&
+                    memory.content.trim() !== "",
+            )
+            .flatMap((memory) => {
+                const parsed = parseBetweenKey(memory.key);
+
+                if (!parsed) return [];
+
+                return [
+                    {
+                        kind: parsed.kind,
+                        about: parsed.about,
+                        content: memory.content,
+                        importance: memory.importance,
+                        updatedAt: memory.updatedAt,
+                    },
+                ];
+            });
     }
 
     private renderSections(profileLimit: number): string {
