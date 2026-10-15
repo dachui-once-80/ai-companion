@@ -4,7 +4,12 @@
  *
  * 三样都要够到同一档，取最低的一档。缺任何一样就停在更远的地方。
  * 没有第一次记忆、也没有第一次连上，或留下的片段和笔记不够，就是刚认识。
+ *
+ * 远近说明里另外写已经记下的质地：第一次连上的日子、习惯的称呼、
+ * 可以直说的、要先听完的。没有记录的那一项就不写，也不编。
  */
+
+import { formatLocalDate } from "../memory/openMemory";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -19,10 +24,10 @@ const CLOSE_KEPT = 12;
 /**
  * 温暖平时是 0.4。
  * 低于 0.32，这一项不够常聊。
- * 明显低于平时（不到 0.39）只够常聊，够不到很熟。
+ * 很熟要明显高于平时。不到 0.55，这一项只够常聊。
  */
 const WARMTH_FAMILIAR = 0.32;
-const WARMTH_CLOSE = 0.39;
+const WARMTH_CLOSE = 0.55;
 
 export type ClosenessTier = "刚认识" | "常聊" | "很熟";
 
@@ -31,6 +36,7 @@ export type ClosenessMemory = {
   status: string;
   content: string;
   createdAt: string;
+  key?: string;
 };
 
 export type ClosenessInput = {
@@ -59,13 +65,27 @@ export function resolveCloseness(input: ClosenessInput): {
   );
   const tier = level === 2 ? "很熟" : level === 1 ? "常聊" : "刚认识";
 
-  return { tier, text: renderCloseness(tier) };
+  return { tier, text: renderCloseness(tier, readTexture(input)) };
 }
 
-export function renderCloseness(tier: ClosenessTier): string {
-  return [
+export function renderCloseness(
+  tier: ClosenessTier,
+  texture: readonly string[] = [],
+): string {
+  const lines = [
     `这一次是「${tier}」。就按${tier}说话。`,
     `${tier}：${TIER_RULE[tier]}`,
+  ];
+
+  if (texture.length > 0) {
+    lines.push(
+      "",
+      ...texture,
+      "只使用上面记下的日子、称呼和话题。没写下的不要编。",
+    );
+  }
+
+  lines.push(
     "",
     "三档是：",
     `刚认识：${TIER_RULE.刚认识}`,
@@ -74,7 +94,117 @@ export function renderCloseness(tier: ClosenessTier): string {
     "",
     "这三档都不改价值观、说话习惯、在意的事、会坚持的看法和内心。",
     "不要出现亲昵到像恋人的话，除非用户自己把关系说成那样，并且已经写进记忆。",
-  ].join("\n");
+  );
+
+  return lines.join("\n");
+}
+
+/**
+ * 只抄当前还留着的记录。
+ * 称呼来自档案里的平时称呼，以及相处里另记的叫法。
+ * 可以直说、要先听完，来自难过时怎么陪，以及要先听完、先别给建议的相处方式。
+ */
+function readTexture(input: ClosenessInput): string[] {
+  const lines: string[] = [];
+  const seen = Date.parse(input.firstSeenAt ?? "");
+
+  if (Number.isFinite(seen)) {
+    lines.push(`第一次连上是 ${formatLocalDate(new Date(seen))}。`);
+  }
+
+  const addresses: string[] = [];
+  const direct: string[] = [];
+  const listen: string[] = [];
+  const hold: string[] = [];
+
+  for (const memory of input.memories) {
+    if (memory.status !== "current") continue;
+
+    const content = memory.content.trim();
+    if (!content) continue;
+
+    const key = memory.key?.trim() ?? "";
+
+    if (key === "preferred_address") {
+      addresses.push(content);
+      continue;
+    }
+
+    if (key === "when_sad") {
+      const mode = whenSadMode(content);
+
+      if (mode === "direct") direct.push(content);
+      else if (mode === "listen") listen.push(content);
+
+      continue;
+    }
+
+    if (memory.category !== "between") continue;
+
+    const kind = betweenKind(key);
+
+    if (kind === "address") addresses.push(content);
+    else if (kind === "listen") listen.push(content);
+    else if (kind === "hold") hold.push(content);
+  }
+
+  for (const content of unique(addresses).slice(0, 4)) {
+    lines.push(`习惯的称呼：${content}`);
+  }
+
+  for (const content of unique(direct).slice(0, 4)) {
+    lines.push(`可以直说：${content}`);
+  }
+
+  for (const content of unique(listen).slice(0, 4)) {
+    lines.push(`要先听完：${content}`);
+  }
+
+  for (const content of unique(hold).slice(0, 4)) {
+    lines.push(`先别给建议：${content}`);
+  }
+
+  return lines;
+}
+
+/** 相处记录的 key 是 between:kind:about。这里只用一直生效的三种。 */
+function betweenKind(key: string): "address" | "listen" | "hold" | null {
+  const match = /^between:(address|listen|hold):(.+)$/.exec(key);
+
+  if (!match?.[2]) return null;
+
+  return match[1] as "address" | "listen" | "hold";
+}
+
+/** 档案里难过时怎么陪，只认已经写明的两种。对不上就不归进直说或先听完。 */
+function whenSadMode(content: string): "direct" | "listen" | null {
+  const text = content.replace(/\s+/g, "");
+
+  if (/想要办法|给我办法|想听建议|给我建议/.test(text)) return "direct";
+
+  if (
+    /先别给建议|别给建议|不要给建议|不要建议|别出主意|想先被听|想被听|先听我说|先听着|听完再说|先听完|别给办法|不要给办法/.test(
+      text,
+    )
+  ) {
+    return "listen";
+  }
+
+  return null;
+}
+
+function unique(items: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const item of items) {
+    if (seen.has(item)) continue;
+
+    seen.add(item);
+    result.push(item);
+  }
+
+  return result;
 }
 
 function countKept(memories: readonly ClosenessMemory[]): number {
