@@ -113,7 +113,10 @@ function App() {
     "all" | MemoryStatus
   >("current");
   const [notice, setNotice] = useState("");
-  const notifiedReminderIds = useRef<Set<string>>(new Set());
+  const voiceOpenRef = useRef(false);
+  const handledReminderIds = useRef<Set<string>>(new Set());
+  const spokenReminderIds = useRef<Set<string>>(new Set());
+  const pendingSettle = useRef<Array<{ id: string; heard: boolean }>>([]);
   const [leftNote, setLeftNote] = useState<{
     text: string;
     leftAt: string;
@@ -256,12 +259,68 @@ function App() {
     let active = true;
     let checking = false;
 
+    const settleReminder = async (id: string, heard: boolean) => {
+      const response = await fetch("/api/tasks/reminders/settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, heard }),
+      });
+
+      if (!response.ok) return null;
+
+      const data: unknown = await response.json();
+
+      if (!data || typeof data !== "object") return null;
+
+      const line =
+        "line" in data && typeof data.line === "string" ? data.line.trim() : "";
+      const leftAt =
+        "leftAt" in data && typeof data.leftAt === "string" ? data.leftAt : "";
+
+      return { line, leftAt };
+    };
+
+    const showHerLine = (line: string, leftAt: string) => {
+      if (!line) return;
+
+      setLeftNote({
+        text: line,
+        leftAt: leftAt || new Date().toISOString(),
+      });
+
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification("阿七", { body: line });
+      }
+    };
+
     const checkReminders = async () => {
       if (checking) return;
       checking = true;
 
       try {
-        const response = await fetch("/api/tasks/reminders");
+        const stillPending: Array<{ id: string; heard: boolean }> = [];
+
+        for (const item of pendingSettle.current) {
+          try {
+            const settled = await settleReminder(item.id, item.heard);
+
+            if (!settled) {
+              stillPending.push(item);
+              continue;
+            }
+
+            if (!item.heard) showHerLine(settled.line, settled.leftAt);
+          } catch (error) {
+            console.error("[Reminder] 补记提醒失败", error);
+            stillPending.push(item);
+          }
+        }
+
+        pendingSettle.current = stillPending;
+
+        const response = await fetch(
+          `/api/tasks/reminders?voice=${voiceOpenRef.current ? "1" : "0"}`,
+        );
 
         if (!response.ok) {
           throw new Error(`读取提醒失败：HTTP ${response.status}`);
@@ -271,26 +330,72 @@ function App() {
           success: boolean;
           reminders?: Array<{
             id: string;
-            title: string;
-            description?: string;
-            reminderAt?: string | null;
+            line: string;
+            delivery: "speak" | "left";
+            leftAt?: string;
           }>;
         } = await response.json();
 
         if (!active || !data.success || !data.reminders) return;
 
+        const toSpeak: Array<{ id: string; line: string }> = [];
+
         for (const reminder of data.reminders) {
-          if (notifiedReminderIds.current.has(reminder.id)) continue;
+          if (spokenReminderIds.current.has(reminder.id)) {
+            try {
+              const settled = await settleReminder(reminder.id, true);
 
-          notifiedReminderIds.current.add(reminder.id);
+              if (!settled) {
+                pendingSettle.current.push({ id: reminder.id, heard: true });
+              }
+            } catch (error) {
+              console.error("[Reminder] 补记已说提醒失败", error);
+              pendingSettle.current.push({ id: reminder.id, heard: true });
+            }
+            continue;
+          }
 
-          setNotice(`⏰ 阿七提醒你：${reminder.title}`);
+          if (handledReminderIds.current.has(reminder.id)) continue;
 
-          // 如果浏览器允许通知，就同时显示系统通知。
-          if ("Notification" in window && Notification.permission === "granted") {
-            new Notification("阿七提醒你", {
-              body: reminder.title,
-            });
+          if (reminder.delivery === "left") {
+            handledReminderIds.current.add(reminder.id);
+            showHerLine(reminder.line, reminder.leftAt ?? "");
+            continue;
+          }
+
+          if (!reminder.line.trim()) continue;
+
+          toSpeak.push({ id: reminder.id, line: reminder.line.trim() });
+        }
+
+        if (toSpeak.length === 0) return;
+
+        for (const item of toSpeak) handledReminderIds.current.add(item.id);
+
+        const said =
+          voiceOpenRef.current && clientRef.current
+            ? await clientRef.current.mentionDue(
+                toSpeak.map((item) => item.line),
+              )
+            : false;
+
+        if (said) {
+          for (const item of toSpeak) spokenReminderIds.current.add(item.id);
+        }
+
+        for (const item of toSpeak) {
+          try {
+            const settled = await settleReminder(item.id, said);
+
+            if (!settled) {
+              pendingSettle.current.push({ id: item.id, heard: said });
+              continue;
+            }
+
+            if (!said) showHerLine(settled.line, settled.leftAt);
+          } catch (error) {
+            console.error("[Reminder] 记录提醒结果失败", error);
+            pendingSettle.current.push({ id: item.id, heard: said });
           }
         }
       } catch (error) {
@@ -414,6 +519,7 @@ function App() {
 
         if (message.type === "connected") {
           holdListeningRef.current = false;
+          voiceOpenRef.current = true;
           setState("connected");
           updateVisualState("listening");
         }
@@ -445,6 +551,7 @@ function App() {
         if (message.type === "error") {
           console.error("[Connection] client error:", message.error);
 
+          voiceOpenRef.current = false;
           clientRef.current = null;
 
           setState("error");
@@ -456,6 +563,7 @@ function App() {
         }
 
         if (message.type === "disconnected") {
+          voiceOpenRef.current = false;
           setState("idle");
           updateVisualState("idle");
           return;
@@ -466,6 +574,7 @@ function App() {
             message.reason,
           );
 
+          voiceOpenRef.current = false;
           clientRef.current = null;
 
           setState("idle");
@@ -491,6 +600,7 @@ function App() {
 
       // 避免连接过程中用户已经断开后又被设回 connected。
       if (clientRef.current === client) {
+        voiceOpenRef.current = true;
         setState("connected");
         updateVisualState("listening");
       }
@@ -514,6 +624,7 @@ function App() {
     const client = clientRef.current;
 
     // 先清空引用，防止后续异步操作误判为仍在连接。
+    voiceOpenRef.current = false;
     clientRef.current = null;
 
     client?.disconnect();

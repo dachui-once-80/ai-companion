@@ -122,6 +122,51 @@ export function dueRef(task: Pick<DueMatter, "id" | "title" | "dueAt" | "reminde
   };
 }
 
+/** 到点时她会说的那一句。说不出口就没有。 */
+export function dueReminderLine(title: string): string | null {
+  return composeAsideLine({
+    kind: "due",
+    about: title.trim(),
+    content: title.trim(),
+    days: null,
+  });
+}
+
+export type ReminderDelivery =
+  | { action: "skip" }
+  | {
+      action: "speak" | "leave";
+      line: string;
+      matterKey: string;
+      matterRevision: string;
+    };
+
+/**
+ * 提醒到点就交付，不等三个小时。
+ * 人在语音里：把这句交给她说。人不在：留下这句。
+ * 同一版本已经说过或留过，就跳过。
+ */
+export function deliverReminder(input: {
+  voiceOpen: boolean;
+  task: Pick<DueMatter, "id" | "title" | "dueAt" | "reminderAt">;
+  alreadySpoken: boolean;
+}): ReminderDelivery {
+  const ref = dueRef(input.task);
+
+  if (input.alreadySpoken) return { action: "skip" };
+
+  const line = dueReminderLine(input.task.title);
+
+  if (!line) return { action: "skip" };
+
+  return {
+    action: input.voiceOpen ? "speak" : "leave",
+    line,
+    matterKey: ref.key,
+    matterRevision: ref.revision,
+  };
+}
+
 function rankCandidates(input: {
   nowMs: number;
   unresolved: readonly ReunionMatter[];

@@ -459,6 +459,19 @@ function readLeftNote(data: unknown): { text: string; leftAt: string } | null {
   return { text, leftAt };
 }
 
+function dueMentionCue(lines: readonly string[]): string {
+  const spoken = lines
+    .map((line) => line.replace(/[\r\n]+/g, "").trim())
+    .filter((line) => line.length > 0);
+
+  if (spoken.length === 0) return "";
+
+  const quoted = spoken.map((line) => `「${line}」`).join("");
+  const which = spoken.length === 1 ? "这一句" : "这几句，按顺序各说一遍";
+
+  return `有事到点了。用你自己的口气说${which}：${quoted}说完回到刚才正在聊的话题，接着说。没有正在聊的，说完就停。不要说这是提醒、待办或通知，不要提编号、记录或工具，也不要调用工具。`;
+}
+
 function leftNoteBlock(text: string, leftAt: string): string {
   const line = text.trim();
 
@@ -662,6 +675,12 @@ export class RealtimeClient {
   // 隔了三个小时以上才有。对方还没开口时，用这一则让她先说一句。
   private reunionCue = "";
   private reunionCued = false;
+  // 到点的那一句还没说完。这段时间让她出声，也不把工具结果交回去。
+  private dueRelease = false;
+  private dueOutput = "";
+  private dueWatch: string[] = [];
+  private dueHeard: ((heard: boolean) => void) | null = null;
+  private dueTimer: number | null = null;
   // 人没连上时她留下的那一句。连上之后算已经说过，不要再念。
   private leftNote: { text: string; leftAt: string } | null = null;
 
@@ -683,6 +702,96 @@ export class RealtimeClient {
 
   setMessageHandler(handler: MessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  /**
+   * 到点了。让她用自己的口气说这几句，然后回到刚才的话题。
+   * 听到她说出来才算数。会话不在，或她没说，返回 false，调用方改成留下那一句。
+   */
+  async mentionDue(lines: readonly string[]): Promise<boolean> {
+    const wanted = lines
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    if (wanted.length === 0 || !this.session || !this.socketConnected) {
+      return false;
+    }
+
+    const heard = await this.cueDue(wanted);
+
+    if (heard || this.dueLineHeard()) return true;
+
+    if (!this.session || !this.socketConnected) return false;
+
+    return this.cueDue(wanted);
+  }
+
+  private cueDue(lines: readonly string[]): Promise<boolean> {
+    const cue = dueMentionCue(lines);
+
+    if (!cue || !this.session || !this.socketConnected) {
+      return Promise.resolve(false);
+    }
+
+    this.finishDueWait(false);
+    this.dueWatch = lines
+      .map((line) => line.replace(/[\s。！？!?，,]/g, ""))
+      .filter((line) => line.length > 0);
+    this.dueOutput = "";
+    this.dueRelease = true;
+    this.spokeThisTurn = false;
+    this.withholdSpeech = false;
+    this.discardUnplayedAudio = false;
+
+    if (this.dueWatch.length === 0) {
+      this.dueRelease = false;
+      return Promise.resolve(false);
+    }
+
+    return new Promise((resolve) => {
+      this.dueHeard = resolve;
+      this.dueTimer = window.setTimeout(() => {
+        this.dueTimer = null;
+        this.finishDueWait(false);
+      }, 12_000);
+
+      const sent = this.sendPresenceNote(cue, true);
+
+      if (!sent) {
+        this.dueRelease = false;
+        this.finishDueWait(false);
+      }
+    });
+  }
+
+  private finishDueWait(heard: boolean): void {
+    if (this.dueTimer !== null) {
+      window.clearTimeout(this.dueTimer);
+      this.dueTimer = null;
+    }
+
+    const finish = this.dueHeard;
+    this.dueHeard = null;
+
+    if (!heard) this.dueRelease = false;
+
+    finish?.(heard);
+  }
+
+  private noteDueOutput(text: string): void {
+    if (!this.dueRelease || this.dueWatch.length === 0) return;
+
+    this.dueOutput += text;
+
+    if (this.dueLineHeard()) this.finishDueWait(true);
+  }
+
+  private dueLineHeard(): boolean {
+    if (this.dueWatch.length === 0) return false;
+
+    const heard = this.dueOutput.replace(/[\s。！？!?，,]/g, "");
+
+    return this.dueWatch.every((line) => heard.includes(line));
   }
 
   private emit(message: RealtimeMessage): void {
@@ -1044,7 +1153,7 @@ export class RealtimeClient {
                 {
                   name: "create_task",
                   description:
-                    "创建并保存一个待办事项。用户明确要求记录、添加或安排待办时调用。必须从用户的话中提取任务标题；如果用户明确给出截止时间或提醒时间，转换为 ISO 8601 日期时间字符串。没有明确时间时不要猜测。注意：当前工具只保存提醒时间，不代表已经启用主动通知。",
+                    "创建并保存一个待办事项。用户明确要求记录、添加或安排待办时调用。必须从用户的话中提取任务标题；如果用户明确给出截止时间或提醒时间，转换为 ISO 8601 日期时间字符串。没有明确时间时不要猜测。到点时另有一则内部说明，让你用自己的口气说一句。保存之后不要说系统会弹通知，也不要提工具或编号。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -2102,6 +2211,10 @@ ${timeContext}
 用户问昨天、前几天时，按记忆里的日期对。对不上就说不记得。
 隔了三个小时带来的心情变化只负责语气温度，不负责开口内容。
 ${leftNoteBlock(asideText, asideLeftAt)}
+## 到点的事
+连线中如果出现一则内部说明，说有事到点了，并给了要说的句子：用你自己的口气把那句说出来，然后回到刚才正在聊的话题。没有正在聊的，说完就停。
+不要说这是提醒、待办或通知。不要提工具、编号或记录。不要为了这件事去查待办。
+
 ## 情绪与陪伴
 下面是同一个人遇到不同的事时怎么接，不是另一套性格。
 先理解用户的情境、情绪和实际需求，再决定如何回应。
@@ -2142,7 +2255,9 @@ ${moodContext}
 普通问题先把事情说清楚。心情只影响温度，不影响事实，也不改写你是谁。价值观、说话习惯、在意的事、会坚持的看法和内心不跟着心情改。
 隔了三个小时再见面时，心情可能会轻轻动一下。那只改语气温度，不决定你开口说什么。原因里如果只是又见面了，那不是一件要讲的事。
 
-对话过程中如果出现以「（内部状态」开头的内容，那是心情已经按新的事更新了，不是用户说的话。不要回复它，不要复述它。之后的话用这个语气。
+对话过程中如果出现以「（内部状态」开头的内容，不是用户说的话。不要把说明本身念出来。
+如果这则只是在改语气，不要因此开口。之后的话用这个语气。
+如果这则说有事到点了，并给了要说的句子，这则就是要你开口。用你自己的口气把那句说出来，然后回到刚才正在聊的话题。没有正在聊的，说完就停。不要说这是提醒、待办或通知，也不要提工具或编号。
 
 ## 对话分寸
 - 不要每次回复都机械追问、重复安慰句式或夸奖。
@@ -2492,10 +2607,11 @@ scope 规则：
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
-      if (this.withholdSpeech) {
+      if (this.withholdSpeech && !this.dueRelease) {
         this.withheldText += outputTranscript;
       } else {
         this.markCompanionSpoke();
+        this.noteDueOutput(outputTranscript);
         this.currentCompanionText += outputTranscript;
 
         if (this.awaitingCompanionText) {
@@ -2518,7 +2634,7 @@ scope 规则：
         return typeof data === "string" && data.length > 0;
       });
 
-      if (hasAudio && this.withholdSpeech) {
+      if (hasAudio && this.withholdSpeech && !this.dueRelease) {
         this.silencePlayback(generation);
       } else if (hasAudio && !this.discardUnplayedAudio) {
         this.markCompanionSpoke();
@@ -2527,7 +2643,12 @@ scope 规则：
 
       for (const part of parts) {
         if (!this.isCurrentConnection(generation)) return;
-        if (this.discardUnplayedAudio || this.withholdSpeech) continue;
+        if (
+          this.discardUnplayedAudio ||
+          (this.withholdSpeech && !this.dueRelease)
+        ) {
+          continue;
+        }
 
         const data = part.inlineData?.data;
 
@@ -2583,7 +2704,9 @@ scope 规则：
     this.lastAppraisedUserText = "";
     this.lastTurnAt = Date.now();
 
+    const dueTurn = this.dueRelease;
     const shouldNudge =
+      !dueTurn &&
       !this.expectingNudge &&
       this.floor === "together" &&
       this.lineForCompanion &&
@@ -2596,9 +2719,17 @@ scope 规则：
 
     this.expectingNudge = false;
 
+    if (dueTurn && this.dueOutput.trim()) {
+      this.dueRelease = false;
+
+      if (this.floor !== "together" && this.floor !== "joined") {
+        this.applySpeechGate(false, generation);
+      }
+    }
+
     if (shouldNudge) {
       this.nudgeReply(userText);
-    } else {
+    } else if (!dueTurn) {
       this.notePresence(generation);
     }
 
@@ -2642,6 +2773,25 @@ scope 规则：
     const functionCalls = toolCall.functionCalls ?? [];
 
     if (functionCalls.length === 0) return;
+
+    if (this.dueRelease) {
+      try {
+        session.sendToolResponse({
+          functionResponses: functionCalls.map((call) => ({
+            name: call.name ?? "tool",
+            id: call.id,
+            response: {
+              success: true,
+              note: "不用查。把到点的那句说完，回到刚才的话题。不要提工具或编号。",
+            },
+          })),
+        });
+      } catch (error) {
+        console.error("[Reminder] failed to skip tool during due line:", error);
+      }
+
+      return;
+    }
 
     const needsAside = functionCalls.some((call) =>
       SLOW_TOOLS.has(call.name ?? ""),
@@ -3746,7 +3896,7 @@ scope 规则：
       !context ||
       !this.isCurrentConnection(generation) ||
       this.discardUnplayedAudio ||
-      this.withholdSpeech
+      (this.withholdSpeech && !this.dueRelease)
     ) {
       return false;
     }
@@ -3764,7 +3914,7 @@ scope 规则：
       !this.isCurrentConnection(generation) ||
       playbackGeneration !== this.playbackGeneration ||
       this.discardUnplayedAudio ||
-      this.withholdSpeech ||
+      (this.withholdSpeech && !this.dueRelease) ||
       context !== this.outputContext ||
       (options?.aside &&
         (this.spokeThisTurn ||

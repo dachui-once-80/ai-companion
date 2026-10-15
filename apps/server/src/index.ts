@@ -11,7 +11,12 @@ import {
 } from "./affect/appraiseModel";
 import { resolveCloseness } from "./companion/closeness";
 import { asideStore } from "./companion/AsideStore";
-import { decideAside } from "./companion/aside";
+import {
+  decideAside,
+  deliverReminder,
+  dueRef,
+  dueReminderLine,
+} from "./companion/aside";
 import { buildReunionOpening } from "./companion/reunion";
 import { Companion } from "./companion/Companion";
 import { holdSessionView } from "./companion/sessionView";
@@ -733,10 +738,8 @@ app.post("/api/tasks", (req, res) => {
     res.status(201).json({
       success: true,
       task,
-      reminderScheduled: false,
-      message: task.reminderAt
-        ? "待办已保存；提醒功能尚未启用，当前还不会自动通知。"
-        : "待办已保存。",
+      reminderScheduled: Boolean(task.reminderAt),
+      message: task.reminderAt ? "已记下，到点会提。" : "待办已保存。",
     });
   } catch (error) {
     console.error("[Tasks] 创建失败:", error);
@@ -847,6 +850,21 @@ async function checkTaskReminders() {
 
   try {
     const now = new Date().toISOString();
+    const speakingStaleBefore = new Date(Date.now() - 45_000).toISOString();
+
+    // 说出或留下之前页面关了，过一会儿再交一次。
+    await db
+      .update(tasks)
+      .set({
+        reminderSent: "queued",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(tasks.reminderSent, "speaking"),
+          lte(tasks.updatedAt, speakingStaleBefore),
+        ),
+      );
 
     const dueTasks = await db
       .select({ id: tasks.id })
@@ -1924,8 +1942,38 @@ app.post("/api/memory/forget", (req, res) => {
   }
 });
 
-// 获取已经到期、等待前端展示的提醒
-app.get("/api/tasks/reminders", async (_req, res) => {
+function claimQueuedReminder(id: string, next: "speaking" | "true"): boolean {
+  const claimed = db
+    .update(tasks)
+    .set({
+      reminderSent: next,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(tasks.id, id),
+        eq(tasks.reminderSent, "queued"),
+      ),
+    )
+    .run();
+
+  return claimed.changes > 0;
+}
+
+function finishReminder(id: string): void {
+  db.update(tasks)
+    .set({
+      reminderSent: "true",
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(tasks.id, id))
+    .run();
+}
+
+// 到期的提醒：人在语音里交给她说，人不在就留下那一句。
+app.get("/api/tasks/reminders", async (req, res) => {
+  const voiceOpen = req.query.voice === "1";
+
   try {
     const queuedTasks = await db
       .select()
@@ -1933,30 +1981,66 @@ app.get("/api/tasks/reminders", async (_req, res) => {
       .where(eq(tasks.reminderSent, "queued"))
       .orderBy(asc(tasks.reminderAt));
 
-    if (queuedTasks.length === 0) {
-      res.json({ success: true, reminders: [] });
-      return;
-    }
+    const reminders: Array<{
+      id: string;
+      line: string;
+      delivery: "speak" | "left";
+      leftAt?: string;
+    }> = [];
 
-    // 标记为已发送，避免前端下一次轮询时重复取到
     for (const task of queuedTasks) {
-      await db
-        .update(tasks)
-        .set({
-          reminderSent: "true",
-          updatedAt: new Date().toISOString(),
-        })
-        .where(
-          and(
-            eq(tasks.id, task.id),
-            eq(tasks.reminderSent, "queued"),
-          ),
-        );
+      const matter = {
+        id: task.id,
+        title: task.title,
+        dueAt: task.dueAt,
+        reminderAt: task.reminderAt,
+      };
+      const ref = dueRef(matter);
+      const delivery = deliverReminder({
+        voiceOpen,
+        task: matter,
+        alreadySpoken: asideStore.hasSpoken(ref.key, ref.revision),
+      });
+
+      if (delivery.action === "skip") {
+        claimQueuedReminder(task.id, "true");
+        continue;
+      }
+
+      if (delivery.action === "leave") {
+        if (!claimQueuedReminder(task.id, "true")) continue;
+
+        const leftAt = new Date().toISOString();
+
+        asideStore.leave({
+          text: delivery.line,
+          leftAt,
+          matterKey: delivery.matterKey,
+          matterRevision: delivery.matterRevision,
+        });
+        console.log("[Reminder] left", delivery.line);
+        reminders.push({
+          id: task.id,
+          line: delivery.line,
+          delivery: "left",
+          leftAt,
+        });
+        continue;
+      }
+
+      if (!claimQueuedReminder(task.id, "speaking")) continue;
+
+      console.log("[Reminder] speak", delivery.line);
+      reminders.push({
+        id: task.id,
+        line: delivery.line,
+        delivery: "speak",
+      });
     }
 
     res.json({
       success: true,
-      reminders: queuedTasks,
+      reminders,
     });
   } catch (error) {
     console.error("获取待办提醒失败：", error);
@@ -1964,5 +2048,66 @@ app.get("/api/tasks/reminders", async (_req, res) => {
       success: false,
       error: "获取待办提醒失败",
     });
+  }
+});
+
+// 语音里说完，记一笔已经说过。没说出来，就改成留下的那一句。
+app.post("/api/tasks/reminders/settle", (req, res) => {
+  const body = req.body as { id?: unknown; heard?: unknown };
+
+  if (typeof body.id !== "string" || !body.id.trim()) {
+    res.status(400).json({ success: false, error: "id is required" });
+    return;
+  }
+
+  if (typeof body.heard !== "boolean") {
+    res.status(400).json({ success: false, error: "heard must be a boolean" });
+    return;
+  }
+
+  try {
+    const task = db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, body.id.trim()))
+      .get();
+
+    if (!task) {
+      res.status(404).json({ success: false, error: "未找到待办" });
+      return;
+    }
+
+    const matter = {
+      id: task.id,
+      title: task.title,
+      dueAt: task.dueAt,
+      reminderAt: task.reminderAt,
+    };
+    const ref = dueRef(matter);
+    const line = dueReminderLine(task.title);
+    let leftAt: string | null = null;
+
+    if (body.heard) {
+      asideStore.noteSpoken(ref.key, ref.revision);
+    } else if (line && !asideStore.hasSpoken(ref.key, ref.revision)) {
+      leftAt = new Date().toISOString();
+      asideStore.leave({
+        text: line,
+        leftAt,
+        matterKey: ref.key,
+        matterRevision: ref.revision,
+      });
+      console.log("[Reminder] left", line);
+    }
+
+    finishReminder(task.id);
+    res.json({
+      success: true,
+      line: leftAt ? line : null,
+      leftAt,
+    });
+  } catch (error) {
+    console.error("[Reminder] settle failed:", error);
+    res.status(500).json({ success: false, error: "记录提醒结果失败" });
   }
 });

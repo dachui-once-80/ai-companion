@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { ASIDE_GAP_MS, composeAsideLine, decideAside, dueRef } from "../companion/aside";
+import {
+  ASIDE_GAP_MS,
+  composeAsideLine,
+  decideAside,
+  deliverReminder,
+  dueRef,
+  dueReminderLine,
+} from "../companion/aside";
 import { dateRef, hangingRef, type ReunionDate, type ReunionMatter } from "../companion/reunion";
 
 const now = new Date(2026, 9, 15, 12, 0, 0).getTime();
@@ -188,6 +195,56 @@ assert.equal(
     days: null,
   }),
   null,
+);
+
+assert.equal(dueReminderLine("交报告"), "交报告的时间到了。");
+assert.equal(dueReminderLine("  "), null);
+assert.equal(dueReminderLine("我昨晚睡了"), null);
+
+const reportTask = {
+  id: "report",
+  title: "交报告",
+  dueAt: null,
+  reminderAt: at(HOUR),
+};
+const spokenDelivery = deliverReminder({
+  voiceOpen: true,
+  task: reportTask,
+  alreadySpoken: false,
+});
+assert.equal(spokenDelivery.action, "speak");
+if (spokenDelivery.action === "speak") {
+  assert.equal(spokenDelivery.line, "交报告的时间到了。");
+  assert.equal(spokenDelivery.matterKey, dueRef(reportTask).key);
+  assert.equal(spokenDelivery.matterRevision, dueRef(reportTask).revision);
+  assert.doesNotMatch(spokenDelivery.line, /提醒|待办|编号|数据库|工具/);
+}
+
+const leftDelivery = deliverReminder({
+  voiceOpen: false,
+  task: reportTask,
+  alreadySpoken: false,
+});
+assert.equal(leftDelivery.action, "leave");
+if (leftDelivery.action === "leave" && spokenDelivery.action === "speak") {
+  assert.equal(leftDelivery.line, spokenDelivery.line);
+}
+
+assert.equal(
+  deliverReminder({
+    voiceOpen: true,
+    task: reportTask,
+    alreadySpoken: true,
+  }).action,
+  "skip",
+);
+assert.equal(
+  deliverReminder({
+    voiceOpen: false,
+    task: { ...reportTask, title: "我昨晚睡了" },
+    alreadySpoken: false,
+  }).action,
+  "skip",
 );
 
 console.log("aside checks passed");

@@ -114,6 +114,26 @@ export class AsideStore {
       .run();
   }
 
+  hasSpoken(matterKey: string, matterRevision: string): boolean {
+    const existing = db
+      .select({ matterKey: companionAsideSpoken.matterKey })
+      .from(companionAsideSpoken)
+      .where(
+        and(
+          eq(companionAsideSpoken.matterKey, matterKey),
+          eq(companionAsideSpoken.matterRevision, matterRevision),
+        ),
+      )
+      .get();
+
+    return Boolean(existing);
+  }
+
+  /** 语音里已经说过。不改页面上留下的那一句。 */
+  noteSpoken(matterKey: string, matterRevision: string): void {
+    this.remember(matterKey, matterRevision, new Date().toISOString());
+  }
+
   /** 语音连上之后，这一句算她已经说过。页面上仍留着，给用户读。 */
   markHeard(): void {
     db.update(companionAsides)
