@@ -72,7 +72,7 @@ export function renderCloseness(tier: ClosenessTier): string {
     `常聊：${TIER_RULE.常聊}`,
     `很熟：${TIER_RULE.很熟}`,
     "",
-    "这三档都不改价值观、说话习惯、在意的事和会坚持的看法。",
+    "这三档都不改价值观、说话习惯、在意的事、会坚持的看法和内心。",
     "不要出现亲昵到像恋人的话，除非用户自己把关系说成那样，并且已经写进记忆。",
   ].join("\n");
 }

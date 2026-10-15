@@ -106,7 +106,7 @@ assert.match(text, /少把对方的事说成自己早就知道/);
 assert.match(text, /称呼保持普通/);
 assert.match(text, /相关的旧事可以自然接/);
 assert.match(text, /可以更直接/);
-assert.match(text, /这三档都不改价值观、说话习惯、在意的事和会坚持的看法/);
+assert.match(text, /这三档都不改价值观、说话习惯、在意的事、会坚持的看法和内心/);
 assert.match(text, /除非用户自己把关系说成那样，并且已经写进记忆/);
 
 const closeText = resolveCloseness({

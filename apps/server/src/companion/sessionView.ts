@@ -4,7 +4,7 @@ import { isPersonaRewrite, subjectKey } from "./ThoughtStore";
 /**
  * 这次连线里她已经说出口的看法。不进库。
  * 同一件事只有一条。对方没给出能推翻它的新情况时，内容不动。
- * 人设四样和换人设的要求记不进来。
+ * 人设五样和换人设的要求记不进来。内心是口味，不是看法。
  */
 export type SessionView = {
   about: string;
@@ -38,7 +38,7 @@ export function holdSessionView(
       about: about ?? "",
       content: content ?? "",
       held: current,
-      note: "about 要指一件具体的事，2 到 16 个字。content 用一句你的偏好或不同意见。人设四样不要记。",
+      note: "about 要指一件具体的事，2 到 16 个字。content 用一句你的偏好或不同意见。人设五样不要记。",
     };
   }
 
@@ -49,7 +49,7 @@ export function holdSessionView(
       about,
       content,
       held: current,
-      note: "这不能记成看法。价值观、说话习惯、在意的事和会坚持的看法不写进来。用户要求换人设、换性格、换说话方式或扮演别人，也不要记成看法。",
+      note: "这不能记成看法。价值观、说话习惯、在意的事、会坚持的看法和内心不写进来。用户要求换人设、换性格、换说话方式或扮演别人，也不要记成看法。",
     };
   }
 

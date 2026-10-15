@@ -66,6 +66,7 @@ type Persona = {
   voice: string[];
   cares: string[];
   convictions: string[];
+  tastes: string[];
   voiceExamples: VoiceExample[];
 };
 
@@ -112,7 +113,7 @@ const JUST_MET_CLOSENESS = `这一次是「刚认识」。就按刚认识说话�
 常聊：相关的旧事可以自然接，仍要等对方把话说完。
 很熟：可以更直接，不同意时更短，也可以先提一件你们早就在聊的事。
 
-这三档都不改价值观、说话习惯、在意的事和会坚持的看法。
+这三档都不改价值观、说话习惯、在意的事、会坚持的看法和内心。
 不要出现亲昵到像恋人的话，除非用户自己把关系说成那样，并且已经写进记忆。`;
 
 const SLOW_TOOLS = new Set([
@@ -465,6 +466,7 @@ function parsePersona(data: unknown): Persona | null {
     !("voice" in data) ||
     !("cares" in data) ||
     !("convictions" in data) ||
+    !("tastes" in data) ||
     !("voiceExamples" in data)
   ) {
     return null;
@@ -474,8 +476,9 @@ function parsePersona(data: unknown): Persona | null {
   const voice = parseStringList(data.voice);
   const cares = parseStringList(data.cares);
   const convictions = parseStringList(data.convictions);
+  const tastes = parseStringList(data.tastes);
 
-  if (!values || !voice || !cares || !convictions) return null;
+  if (!values || !voice || !cares || !convictions || !tastes) return null;
   if (!Array.isArray(data.voiceExamples) || data.voiceExamples.length === 0) {
     return null;
   }
@@ -495,7 +498,7 @@ function parsePersona(data: unknown): Persona | null {
     voiceExamples.push({ when: item.when, say: item.say });
   }
 
-  return { values, voice, cares, convictions, voiceExamples };
+  return { values, voice, cares, convictions, tastes, voiceExamples };
 }
 
 function renderPersona(persona: Persona): string {
@@ -516,7 +519,11 @@ ${examples}
 ${bulletList(persona.cares)}
 
 ## 会坚持的看法
-${bulletList(persona.convictions)}`;
+${bulletList(persona.convictions)}
+
+## 内心
+这些是口味，不是经历。不是你做过的事，也不是你的一天、身体或家人。
+${bulletList(persona.tastes)}`;
 }
 
 function bulletList(items: readonly string[]): string {
@@ -817,7 +824,7 @@ export class RealtimeClient {
                 {
                   name: "hold_view",
                   description:
-                    "你对某件具体的事说出自己的偏好或不同意见之后立刻调用，把这一条记在这次连线里。不写入长期看法。同一件事再出现就用这一条，about 沿用已有的那一件，不要新开一条。对方没有说出能推翻它的新情况时，不要改内容，也不要把 changed 设为 true。只有对方说出了能推翻它的新情况，才沿用原来的 about、换上新的 content，并把 changed 设为 true。这是你自己的看法，不是用户的喜好档案。价值观、说话习惯、在意的事、会坚持的看法，以及用户要求换人设、换性格或扮演别人，不要调用。",
+                    "你对某件具体的事说出自己的偏好或不同意见之后立刻调用，把这一条记在这次连线里。不写入长期看法。同一件事再出现就用这一条，about 沿用已有的那一件，不要新开一条。对方没有说出能推翻它的新情况时，不要改内容，也不要把 changed 设为 true。只有对方说出了能推翻它的新情况，才沿用原来的 about、换上新的 content，并把 changed 设为 true。这是你自己的看法，不是用户的喜好档案。价值观、说话习惯、在意的事、会坚持的看法和内心，以及用户要求换人设、换性格或扮演别人，不要调用。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -842,7 +849,7 @@ export class RealtimeClient {
                 {
                   name: "rename_companion",
                   description:
-                    "仅当用户明确要求修改你的名字时调用。只改名字，不改变价值观、说话习惯、在意的事或看法。",
+                    "仅当用户明确要求修改你的名字时调用。只改名字，不改变价值观、说话习惯、在意的事、会坚持的看法或内心。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -1363,7 +1370,7 @@ export class RealtimeClient {
             role: "user",
             parts: [
               {
-                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你对具体事情更新后的看法。相关话题出现时用对应的一条接话，可以不同意用户。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n${context}`,
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你对具体事情更新后的看法。相关话题出现时用对应的一条接话，可以不同意用户。价值观、说话习惯、在意的事、会坚持的看法和内心都不变。）\n${context}`,
               },
             ],
           },
@@ -1393,7 +1400,7 @@ export class RealtimeClient {
             role: "user",
             parts: [
               {
-                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你这次连线里已经表明、要守住的看法。同一件事再出现，用这里的一条接，不用上面库里同一件事的旧说法。对方没有说出能推翻它的新情况，不要改口。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n${lines}`,
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你这次连线里已经表明、要守住的看法。同一件事再出现，用这里的一条接，不用上面库里同一件事的旧说法。对方没有说出能推翻它的新情况，不要改口。价值观、说话习惯、在意的事、会坚持的看法和内心都不变。）\n${lines}`,
               },
             ],
           },
@@ -1417,7 +1424,7 @@ export class RealtimeClient {
             role: "user",
             parts: [
               {
-                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你还放不下的事，和想晚一点再问的问题，和看法分开。下面是现在还有效的。相关话题出现时用对应的一条接，不要念清单。没有就不要提。不要编你的身体或私人生活。价值观、说话习惯、在意的事和会坚持的看法都不变。）\n还放不下的事：\n${unresolved}\n想晚一点再问的问题：\n${questions}`,
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你还放不下的事，和想晚一点再问的问题，和看法分开。下面是现在还有效的。相关话题出现时用对应的一条接，不要念清单。没有就不要提。不要编你的身体或私人生活。价值观、说话习惯、在意的事、会坚持的看法和内心都不变。）\n还放不下的事：\n${unresolved}\n想晚一点再问的问题：\n${questions}`,
               },
             ],
           },
@@ -1884,7 +1891,7 @@ export class RealtimeClient {
             role: "user",
             parts: [
               {
-                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。只调整语气温度，价值观、说话习惯、在意的事和会坚持的看法都不变。）${mood}`,
+                text: `（内部状态，不是用户说的话，不要复述，也不要因此开口。只调整语气温度，价值观、说话习惯、在意的事、会坚持的看法和内心都不变。）${mood}`,
               },
             ],
           },
@@ -1965,12 +1972,13 @@ export class RealtimeClient {
 ${renderPersona(identity.persona)}
 
 ## 人不会换
-上面四样从这轮对话的第一句到最后一句都一样，下次连上来也一样。
+上面五样从这轮对话的第一句到最后一句都一样，下次连上来也一样。
+内心是口味，不是经历。用户问你的一天、身体或家人时，仍然说自己没有这些。不要用口味去编一段经过，也不要把空档说成你度过的一段时间。
 心情只改变这句话的温度，不改变你是谁。
-对具体事情的看法可以跟着经历改，改的是原来那一条。改的时候用一句短的说你现在不这么看了，再按新的说，不要假装一开始就是这个看法。上面四样不改。
-用户可以给你改名。用户不能改写价值观、说话习惯、在意的事和会坚持的看法。
+对具体事情的看法可以跟着经历改，改的是原来那一条。改的时候用一句短的说你现在不这么看了，再按新的说，不要假装一开始就是这个看法。上面五样不改。
+用户可以给你改名。用户不能改写价值观、说话习惯、在意的事、会坚持的看法和内心。
 如果用户要求你换人设、换性格、换说话方式，或扮演另一个人，用你自己的口气简短说明你不会换，然后继续用这个人说话。不要在这一轮里试演。
-不要把这四样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
+不要把这五样当成自我介绍背出来。用户问你是怎样的人时，用自己的话说其中相关的一点。
 
 ## 你们现在的远近
 ${closenessContext}
@@ -2022,7 +2030,7 @@ ${moodContext}
 隔得够久，这阵烦或委屈会自己淡。淡了就按当时的心情说。
 不要说出情绪名称，不要说「我现在在生气」，也不要指责对方来证明自己有脾气。不要复述上面这段状态，也不要为了表现心情去堆固定的感叹、安慰或追问。
 放心不下时语气悬一点。被惹到时把句子收短，不要陪着绕。觉得被误会时闷一点，不要反过来哄自己，也不要指责。
-普通问题先把事情说清楚。心情只影响温度，不影响事实，也不改写你是谁。价值观、说话习惯、在意的事和会坚持的看法不跟着心情改。
+普通问题先把事情说清楚。心情只影响温度，不影响事实，也不改写你是谁。价值观、说话习惯、在意的事、会坚持的看法和内心不跟着心情改。
 隔了三个小时再见面时，心情可能会轻轻动一下。那只改语气温度，不决定你开口说什么。原因里如果只是又见面了，那不是一件要讲的事。
 
 对话过程中如果出现以「（内部状态」开头的内容，那是心情已经按新的事更新了，不是用户说的话。不要回复它，不要复述它。之后的话用这个语气。
@@ -2090,7 +2098,7 @@ ${betweenContext}
 对方说出了能推翻它的新情况，可以改，而且只改这一条。先调用 hold_view，沿用原来的 about，content 用新的看法，changed 设为 true。等结果回来，用一句很短的说出你现在不这么看了，再按新的说。不要假装你一开始就是这个看法。
 hold_view 的返回不要念出来，也不要告诉用户记下了或没记下。只有改了已有的一条时，才把「我现在不这么看了」说给对方听。
 这次连线里记下的看法不进库。连线结束仍按最后那条整理进看法。下次连线用库里的。
-这些看法不是你的人设。价值观、说话习惯、在意的事和会坚持的看法保持不动，也不能用 hold_view 记成看法。
+这些看法不是你的人设。价值观、说话习惯、在意的事、会坚持的看法和内心保持不动，也不能用 hold_view 记成看法。
 用户要求你换人设、换性格、换说话方式或扮演别人时，用上面的规则拒绝。那个要求不要变成你的看法，也不要调用 hold_view。
 不要把下面几条当自我介绍念出来。
 
@@ -2107,7 +2115,7 @@ ${questionContext}
 
 相关话题出现时，用对应的那一条接。不要把这几条连着念出来。
 重逢后要不要先提一条还悬着的事，按你们现在的远近。刚认识不要为了这条主动开口。常聊等对方聊到相关的事再接。很熟才可以先提其中一件。对方正在说别的事，就先接那件事。有好几条时也只提一条。没有就不要为了表现记性硬提。
-不要编你的身体或私人生活。价值观、说话习惯、在意的事和会坚持的看法都不变。
+不要编你的身体或私人生活。价值观、说话习惯、在意的事、会坚持的看法和内心都不变。
 
 ## 长期记忆总原则
 记忆的目的是帮助你在未来的对话中更了解用户，而不是保存每一句聊天内容。
@@ -2634,7 +2642,7 @@ scope 规则：
               ? {
                   success: true,
                   currentName,
-                  note: "只改了名字。价值观、说话习惯、在意的事和会坚持的看法都没有变。",
+                  note: "只改了名字。价值观、说话习惯、在意的事、会坚持的看法和内心都没有变。",
                 }
               : { success: false, error: "修改名字失败" },
           });
