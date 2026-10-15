@@ -5,6 +5,7 @@ import {
 } from "./MemoryStore";
 import {
     betweenKey,
+    betweenLabel,
     describeBetweenText,
     parseBetweenKey,
     renderBetweenText,
@@ -25,6 +26,22 @@ import {
     openId,
     openKey,
 } from "./openMemory";
+import {
+    candidateFromMemory,
+    candidateFromView,
+    isTrivialUtterance,
+    literalMatches,
+    renderCandidateLine,
+    selectByMeaning,
+    toRecalled,
+    type MeaningDeps,
+    type RecallCandidate,
+    type RecalledMemory,
+} from "./meaning";
+
+type ViewSource = {
+    list(kind: "view"): Array<{ id: string; about: string; content: string }>;
+};
 
 const importanceRank: Record<MemoryImportance, number> = {
     high: 3,
@@ -51,6 +68,8 @@ function byImportanceThenTime(a: Memory, b: Memory): number {
 export class MemoryManager {
     constructor(
         private readonly store: MemoryStore,
+        private readonly views: ViewSource | null = null,
+        private readonly meaning: MeaningDeps | null = null,
     ) { }
 
     remember(input: RememberMemoryInput) {
@@ -61,8 +80,54 @@ export class MemoryManager {
         return this.store.forgetCurrentMemory(key, targetContent);
     }
 
-    recall(options: RecallMemoryOptions) {
-        return this.store.recall(options);
+    /**
+     * 按意思找。字面对得上的也能找到。
+     * 没有够近的结果就空着，不用相近的另一件事来顶。
+     */
+    async recall(options: RecallMemoryOptions): Promise<RecalledMemory[]> {
+        const query = options.query.trim();
+        const key = options.key?.trim() || undefined;
+        const scope = options.scope ?? "all";
+        const pool = this.collect(scope, key);
+
+        if (!query) return pool.map(toRecalled);
+
+        const picked = await this.pick(pool, query, 4);
+
+        return picked.map(toRecalled);
+    }
+
+    /**
+     * 连线中这一句明显在说某个人或某件旧事时，补进那几条。
+     * 对不上就返回空，不把整段历史塞进来。
+     */
+    async relevantText(utterance: string): Promise<string> {
+        const topic = utterance.trim();
+
+        if (topic.length < 2 || isTrivialUtterance(topic)) return "";
+
+        const pool = this.collect("all").filter((item) => !item.standing);
+        const picked = await this.pick(pool, topic, 4);
+        const lines = new Map<string, string>();
+
+        for (const item of picked) {
+            lines.set(contentKey(item.content), renderCandidateLine(item));
+        }
+
+        for (const extra of selectBetween(this.currentBetween(), topic)) {
+            if (isStandingKind(extra.kind) || lines.size >= 4) continue;
+
+            const key = contentKey(extra.content);
+
+            if (lines.has(key)) continue;
+
+            lines.set(
+                key,
+                `- 我们之间 ${betweenLabel(extra.kind)}：${extra.content}`,
+            );
+        }
+
+        return [...lines.values()].join("\n");
     }
 
     /** 当前档案里、以后能按日期读出来的在意的日子。 */
@@ -142,7 +207,7 @@ export class MemoryManager {
             "- important_date 是生日以外在意的日子。日期在内容开头，每年重复的以「每年 MM-DD」开头。",
             "- daily_routine 是大致作息，current_activity 是正在做的事。",
             "- 彼此的笑话、答应了还没做的事、某一件具体的事要不要先听完，不在档案里。那些在「我们之间」。",
-            "- 问更早的事，或上下文里没有的事，调用 recall_memory，用事情里的词去查，不要编档案 key。",
+            "- 问更早的事，或上下文里没有的事，调用 recall_memory。按意思查，不必和当初的用词一样，也不要编档案 key。没有对得上的结果就说不记得，不要用相近但不对的事顶上。",
             "- 用户明确说出姓名、城市、喜好、难过时想被怎样陪、平时怎么称呼、作息、正在做的事、不想被碰的话题、在意的日子时，用 remember_memory 写入对应档案。某一天的事、近况和你的感觉不要写进档案。没说出口的不要推断。假设、玩笑、转述别人的不要写。",
             "- 不要编造这里没有的个人信息。",
         ].join("\n");
@@ -216,6 +281,42 @@ export class MemoryManager {
             "between",
             betweenKey(kind, about),
         );
+    }
+
+    private async pick(
+        pool: RecallCandidate[],
+        query: string,
+        limit: number,
+    ): Promise<RecallCandidate[]> {
+        if (!this.meaning) return literalMatches(pool, query).slice(0, limit);
+
+        return selectByMeaning(pool, query, this.meaning, limit);
+    }
+
+    private collect(scope: "current" | "historical" | "all", key?: string): RecallCandidate[] {
+        const memories = this.store
+            .getAll()
+            .filter((memory) => {
+                if (scope !== "all" && memory.status !== scope) return false;
+                if (key && memory.key !== key) return false;
+
+                return true;
+            })
+            .flatMap((memory) => {
+                const candidate = candidateFromMemory(memory);
+
+                return candidate ? [candidate] : [];
+            });
+
+        if (key || scope === "historical" || !this.views) return memories;
+
+        const views = this.views.list("view").flatMap((view) => {
+            const candidate = candidateFromView(view);
+
+            return candidate ? [candidate] : [];
+        });
+
+        return [...memories, ...views];
     }
 
     private currentBetween(): BetweenRecord[] {

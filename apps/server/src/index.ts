@@ -19,6 +19,7 @@ import {
 } from "./companion/ThoughtStore";
 import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
+import { createGeminiMeaning } from "./memory/meaning";
 import {
   ConsolidationInputError,
   consolidateConversation,
@@ -119,7 +120,11 @@ const gemini = new GoogleGenAI({
 const memoryStore = new MemoryStore();
 
 
-const memoryManager = new MemoryManager(memoryStore);
+const memoryManager = new MemoryManager(
+  memoryStore,
+  thoughtStore,
+  createGeminiMeaning(geminiApiKey, gemini),
+);
 
 // app.get(
 //   "/api/memory/identity",
@@ -1342,6 +1347,19 @@ app.get("/api/memory/between", (req, res) => {
   }
 });
 
+app.get("/api/memory/relevant", async (req, res) => {
+  const utterance =
+    typeof req.query.utterance === "string" ? req.query.utterance : "";
+
+  try {
+    const text = await memoryManager.relevantText(utterance);
+    res.json({ text });
+  } catch (error) {
+    console.error("[Memory] relevant recall failed:", error);
+    res.status(500).json({ error: "Failed to recall relevant memories" });
+  }
+});
+
 function quotaRetryMs(error: unknown): number | null {
   const message = error instanceof Error ? error.message : String(error);
   const status =
@@ -1527,7 +1545,7 @@ app.patch("/api/memory/:id", (req, res) => {
   }
 });
 
-app.get("/api/memory/search", (req, res) => {
+app.get("/api/memory/search", async (req, res) => {
   const query = String(req.query.query ?? "").trim();
   const key = req.query.key
     ? String(req.query.key).trim()
@@ -1554,16 +1572,21 @@ app.get("/api/memory/search", (req, res) => {
     });
   }
 
-  const results = memoryManager.recall({
-    query,
-    key,
-    scope: scopeValue as
-      | "current"
-      | "historical"
-      | "all",
-  });
+  try {
+    const results = await memoryManager.recall({
+      query,
+      key,
+      scope: scopeValue as
+        | "current"
+        | "historical"
+        | "all",
+    });
 
-  return res.json(results);
+    return res.json(results);
+  } catch (error) {
+    console.error("[Memory] recall failed:", error);
+    return res.status(500).json({ error: "Failed to recall memories" });
+  }
 });
 
 app.post("/api/memory", (req, res) => {

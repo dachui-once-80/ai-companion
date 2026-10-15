@@ -552,7 +552,8 @@ export class RealtimeClient {
   private currentEmotion: CompanionEmotion = "calm";
   private currentCause = "";
   private lastInjectedMood = "";
-  private lastBetweenExtra = "";
+  private lastRelevant = "";
+  private relevantTimer: number | null = null;
   private affectUpdatedAt = "";
   private affectTimer: number | null = null;
   private userAppraisalTimer: number | null = null;
@@ -920,7 +921,7 @@ export class RealtimeClient {
                 {
                   name: "recall_memory",
                   description:
-                    "当用户询问个人信息、以前的经历、昨天或前几天发生的事、近况，或任何依赖过去聊天的问题时调用。查最近的事时用事情里的词，不要编造档案字段。",
+                    "当用户这句话是在说某个人、某件旧事、以前的偏好或近况时调用。按意思查，query 用这件事，不必和当初的用词一样，也不要编档案字段。没有对得上的结果就说不记得，不要用别的旧事代替。",
                   parametersJsonSchema: {
                     type: "object",
                     properties: {
@@ -1477,12 +1478,29 @@ export class RealtimeClient {
     }
   }
 
-  private async loadBetweenTopic(topic: string): Promise<string> {
-    const params = new URLSearchParams({ topic });
-    const response = await fetch(`/api/memory/between?${params.toString()}`);
+  private scheduleRelevant(generation: number): void {
+    if (this.relevantTimer !== null) {
+      window.clearTimeout(this.relevantTimer);
+    }
+
+    this.relevantTimer = window.setTimeout(() => {
+      this.relevantTimer = null;
+      const userText = this.currentUserText.trim();
+
+      if (!this.lineForCompanion || userText.length < 2 || isBackchannel(userText)) {
+        return;
+      }
+
+      void this.refreshRelevant(userText, generation);
+    }, 500);
+  }
+
+  private async loadRelevant(utterance: string): Promise<string> {
+    const params = new URLSearchParams({ utterance });
+    const response = await fetch(`/api/memory/relevant?${params.toString()}`);
 
     if (!response.ok) {
-      throw new Error(`Between topic request failed: ${response.status}`);
+      throw new Error(`Relevant memory request failed: ${response.status}`);
     }
 
     const data: unknown = await response.json();
@@ -1490,10 +1508,10 @@ export class RealtimeClient {
     if (
       typeof data === "object" &&
       data !== null &&
-      "topical" in data &&
-      typeof data.topical === "string"
+      "text" in data &&
+      typeof data.text === "string"
     ) {
-      return data.topical;
+      return data.text;
     }
 
     return "";
@@ -1510,22 +1528,22 @@ export class RealtimeClient {
     );
   }
 
-  private async refreshBetweenTopic(
+  private async refreshRelevant(
     topic: string,
     generation: number,
   ): Promise<void> {
     try {
-      const topical = await this.loadBetweenTopic(topic);
+      const text = await this.loadRelevant(topic);
 
       if (!this.isCurrentConnection(generation)) return;
-      if (!topical || topical === this.lastBetweenExtra) return;
+      if (!text || text === this.lastRelevant) return;
 
-      this.lastBetweenExtra = topical;
+      this.lastRelevant = text;
       this.injectBetween(
-        `（内部状态，不是用户说的话，不要复述，也不要因此开口。这是你们之间和当前话题有关的事。相关时用这一条，不要念出来。）\n${topical}`,
+        `（内部状态，不是用户说的话，不要复述，也不要因此开口。下面几条和对方刚刚说的是同一件事或同一个人。这一句只接这几条。没有列出的旧事不要一起讲，也不要用别的记忆顶上。对不上就当不记得。）\n${text}`,
       );
     } catch (error) {
-      console.warn("[Memory] between topic failed:", error);
+      console.warn("[Memory] relevant recall failed:", error);
     }
   }
 
@@ -2079,8 +2097,8 @@ ${memoryContext}
 不要把用户对你性格、说话方式或人设的要求存进记忆，也不要据此改变自己，也不要把那个要求当成你对某件事的看法，也不要当成你们之间的相处方式。
 只在与对话相关时自然使用，不要主动逐条复述，也不要说「根据记忆」。
 问昨天、前几天时，先对照记忆开头的日期。对不上就说不记得，不要编。现在的钟点不能用来补一段没有记下的经过。
-如果用户询问过去的信息，调用 recall_memory 查询历史记录。查最近的事时用事情里的词，不要编一个档案字段。
-如果没有相关记忆，不要猜测或编造。
+如果用户询问过去的信息，或这句话明显在说某个人、某件旧事，调用 recall_memory。按意思查，不必和当初的用词一样，不要编一个档案字段。
+没有对得上的记忆就说不记得。不要用相近但不对的旧事来顶，也不要把没问到的旧事一起讲出来。
 
 某一天发生的事、你对用户近况的判断、对不上档案字段但值得留下的内容，以及彼此的笑话、还没做的约定、某一件具体的事要不要先听完，会在这段对话之后整理进去。不要为了这些当场调用 remember_memory，也不要告诉用户系统记不住。难过时想被听还是想要办法、平时怎么称呼、作息、正在做的事、不想被碰的话题、在意的日子，用户明确说了就调用 remember_memory。
 
@@ -2205,8 +2223,8 @@ favorite_food、favorite_drink、hobby、interest、favorite_music、favorite_mo
 不要仅仅因为用户提到一个新兴趣、新目标或新的人，就撤销之前的其他记忆。
 
 ## 记忆召回
-当用户询问个人信息、偏好、经历、关系、目标、昨天或前几天发生的事、近况，或提出明显依赖过去聊天的问题时，调用 recall_memory。
-如果能确定档案字段，应尽量提供准确的字段；不确定时不要编造。查片段和判断时，用事情里的词作为 query，不要填一个不存在的字段。
+当用户询问个人信息、偏好、经历、关系、目标、昨天或前几天发生的事、近况，或这句话明显在说某个人或某件旧事时，调用 recall_memory。
+按意思查。query 用这件事，可以换一种说法，不必照搬原文。如果能确定档案字段，应尽量提供准确的字段；不确定时不要编造，也不要填一个不存在的字段。
 
 scope 规则：
 - current：当前仍然成立的信息。
@@ -2237,7 +2255,7 @@ scope 规则：
 
 多值记忆查询时，综合所有相关结果，不要只挑一条。
 如果用户问的问题涉及多个 key，可以进行必要的多次查询；不要在没有查询结果时假装记得。
-工具返回空结果时，明确说明目前没有查到相关记忆，可以请用户补充，而不是猜测。
+工具返回空结果时，说不记得，可以请用户补充。不要用相近但不对的记忆顶上，也不要把没返回的旧事一起讲出来。
 
 ## 更新与撤销记忆
 只有当用户明确更正某项单值事实，或明确表示某项多值记忆不再成立时，才执行对应的记忆操作。
@@ -2366,6 +2384,10 @@ scope 规则：
         speaker: transcriptSpeaker(decision, speaker),
       });
 
+      if (this.lineForCompanion && !isBackchannel(this.currentUserText)) {
+        this.scheduleRelevant(generation);
+      }
+
       // 她还在出声时用户已经开口，立刻停播。
       this.bargeInFromUser(generation);
     }
@@ -2458,8 +2480,13 @@ scope 规则：
       userText,
     );
 
-    if (this.lineForCompanion && userText.length >= 2) {
-      void this.refreshBetweenTopic(userText, generation);
+    if (this.relevantTimer !== null) {
+      window.clearTimeout(this.relevantTimer);
+      this.relevantTimer = null;
+    }
+
+    if (this.lineForCompanion && userText.length >= 2 && !isBackchannel(userText)) {
+      void this.refreshRelevant(userText, generation);
     }
     this.awaitingCompanionText = true;
     this.companionCaptureStartedAt = Date.now();
@@ -2798,12 +2825,20 @@ scope 规则：
           );
 
           const data: unknown = await this.readJson(response);
+          const memories = Array.isArray(data) ? data : [];
 
           responses.push({
             name,
             id: call.id,
             response: response.ok
-              ? { success: true, memories: data }
+              ? {
+                  success: true,
+                  memories,
+                  note:
+                    memories.length === 0
+                      ? "没有对得上的记忆。直接说不记得，不要用别的旧事代替。"
+                      : "只用和问题对得上的这几条。不要把没返回的旧事一起讲。",
+                }
               : { success: false, error: "读取记忆失败" },
           });
 
@@ -3802,6 +3837,7 @@ scope 规则：
     this.currentEmotion = "calm";
     this.currentCause = "";
     this.lastInjectedMood = "";
+    this.lastRelevant = "";
     this.affectUpdatedAt = "";
 
     if (this.affectTimer !== null) {
@@ -3812,6 +3848,11 @@ scope 规则：
     if (this.userAppraisalTimer !== null) {
       window.clearTimeout(this.userAppraisalTimer);
       this.userAppraisalTimer = null;
+    }
+
+    if (this.relevantTimer !== null) {
+      window.clearTimeout(this.relevantTimer);
+      this.relevantTimer = null;
     }
     this.nextOutputTime = 0;
 
