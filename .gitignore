@@ -3,3 +3,9 @@ dist/
 *.log
 .env
 .DS_Store
+
+# Local runtime SQLite database. Schema and migrations stay tracked.
+/apps/server/companion.db
+/apps/server/companion.db-wal
+/apps/server/companion.db-shm
+/apps/server/companion.db-journal
