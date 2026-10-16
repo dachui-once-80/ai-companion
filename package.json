@@ -4,9 +4,13 @@
   "scripts": {
     "dev:web": "pnpm --filter web dev",
     "dev:server": "pnpm --filter server dev",
+    "check:web:type": "pnpm --filter web exec tsc -b --pretty false",
+    "check:web:lint": "pnpm --filter web lint",
+    "check:web:build": "pnpm --filter web build",
     "check:server:type": "pnpm --filter server typecheck",
     "check:server:lint": "pnpm --filter server lint",
-    "check:offline": "pnpm --filter server test:offline"
+    "check:offline": "pnpm --filter server test:offline",
+    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {
