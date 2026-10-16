@@ -3,7 +3,10 @@
   "private": true,
   "scripts": {
     "dev:web": "pnpm --filter web dev",
-    "dev:server": "pnpm --filter server dev"
+    "dev:server": "pnpm --filter server dev",
+    "check:server:type": "pnpm --filter server typecheck",
+    "check:server:lint": "pnpm --filter server lint",
+    "check:offline": "pnpm --filter server test:offline"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {

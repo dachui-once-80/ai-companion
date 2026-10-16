@@ -1,12 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import Database from "better-sqlite3";
+import { prepareOfflineDb } from "./offlineDb.ts";
 
-const dir = mkdtempSync(join(tmpdir(), "between-"));
-const file = join(dir, "companion.db");
-process.env.COMPANION_DB = file;
+const file = prepareOfflineDb("between-");
 
 const sqlite = new Database(file);
 sqlite.exec(`
@@ -238,8 +234,6 @@ console.log(next);
 
 memory.clear();
 
-await liveRound(memory, thoughts);
-
 function section(text: string, title: string): string {
   const start = text.indexOf(`## ${title}`);
 
@@ -251,18 +245,21 @@ function section(text: string, title: string): string {
   return nextHeading < 0 ? rest : rest.slice(0, nextHeading);
 }
 
-async function liveRound(
-  store: InstanceType<typeof MemoryManager>,
-  thoughtStore: InstanceType<typeof ThoughtStore>,
-): Promise<void> {
-  const dotenv = await import("dotenv");
-  dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+export async function runLive(): Promise<void> {
+  if (process.env.COMPANION_LIVE_SKIP_DOTENV !== "1") {
+    const dotenv = await import("dotenv");
+    dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+  }
 
   const apiKey = process.env.GEMINI_API_KEY?.trim();
 
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is missing");
+    console.error("[between] live precondition not met: GEMINI_API_KEY is missing");
+    process.exit(1);
   }
+
+  const store = memory;
+  const thoughtStore = thoughts;
 
   const proxy = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || "http://127.0.0.1:1082";
 

@@ -75,8 +75,6 @@ assert.match(byName.get("hold_view") ?? "", /不要说已经记下/);
 
 console.log("[prompt] instruction is shorter; field list and search steps sit on the tools");
 
-await liveRound(prompt, tools);
-
 function spokenSentences(text: string): string[] {
   return text
     .split(/[。？！!?]/)
@@ -84,18 +82,21 @@ function spokenSentences(text: string): string[] {
     .filter((part) => part.length > 0);
 }
 
-async function liveRound(
-  system: string,
-  declarations: ReturnType<typeof sessionFunctionDeclarations>,
-): Promise<void> {
-  const dotenv = await import("dotenv");
-  dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+export async function runLive(): Promise<void> {
+  if (process.env.COMPANION_LIVE_SKIP_DOTENV !== "1") {
+    const dotenv = await import("dotenv");
+    dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+  }
 
   const apiKey = process.env.GEMINI_API_KEY?.trim();
 
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is missing");
+    console.error("[prompt] live precondition not met: GEMINI_API_KEY is missing");
+    process.exit(1);
   }
+
+  const system = prompt;
+  const declarations = tools;
 
   const proxy =
     process.env.HTTP_PROXY || process.env.HTTPS_PROXY || "http://127.0.0.1:1082";

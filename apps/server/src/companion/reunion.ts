@@ -18,9 +18,7 @@ export const DATE_NEAR_DAYS = 7;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const HANGING_KINDS = ["unresolved", "question", "promise"] as const;
-
-type HangingKind = (typeof HANGING_KINDS)[number];
+type HangingKind = "unresolved" | "question" | "promise";
 
 const KIND_LABEL: Record<HangingKind, string> = {
   unresolved: "还放不下的事",

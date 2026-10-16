@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
-import { REUNION_GAP_MS } from "../affect/affect";
+import type { ReunionDate, ReunionMatter } from "../companion/reunion";
 import {
+  assertOfflineDbIsolated,
+  cleanupOfflineDb,
+  prepareOfflineDb,
+} from "./offlineDb.ts";
+
+// import type 会被擦除；值导入必须在 prepareOfflineDb 之后动态进行。
+const offlineDb = prepareOfflineDb("reunion-");
+await assertOfflineDbIsolated(offlineDb);
+
+const { REUNION_GAP_MS } = await import("../affect/affect");
+const {
   buildReunionOpening,
   DATE_NEAR_DAYS,
   daysUntilImportant,
   hangingRef,
   RECENT_MATTER_MS,
-  type ReunionDate,
-  type ReunionMatter,
-} from "../companion/reunion";
+} = await import("../companion/reunion");
 
 const now = new Date(2026, 9, 15, 12, 0, 0).getTime();
 const HOUR = 60 * 60 * 1000;
@@ -46,6 +55,20 @@ function open(input: {
     dates: input.dates ?? [],
     skip: input.skip,
   });
+}
+
+function exam(daysAhead: number, label = "考试"): ReunionDate {
+  const when = new Date(now + daysAhead * 24 * HOUR);
+
+  return {
+    date: `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`,
+    yearly: false,
+    label,
+  };
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
 }
 
 const interview = matter("面试", "结果还没出来", 2 * 24 * HOUR);
@@ -152,18 +175,5 @@ assert.equal(
   null,
 );
 
+cleanupOfflineDb(offlineDb);
 console.log("reunion checks passed");
-
-function exam(daysAhead: number, label = "考试"): ReunionDate {
-  const when = new Date(now + daysAhead * 24 * HOUR);
-
-  return {
-    date: `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`,
-    yearly: false,
-    label,
-  };
-}
-
-function pad(value: number): string {
-  return String(value).padStart(2, "0");
-}

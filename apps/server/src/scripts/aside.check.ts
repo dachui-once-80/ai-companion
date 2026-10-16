@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
+import type { ReunionDate, ReunionMatter } from "../companion/reunion";
 import {
+  assertOfflineDbIsolated,
+  cleanupOfflineDb,
+  prepareOfflineDb,
+} from "./offlineDb.ts";
+
+// import type 会被擦除；值导入必须在 prepareOfflineDb 之后动态进行。
+const offlineDb = prepareOfflineDb("aside-");
+await assertOfflineDbIsolated(offlineDb);
+
+const { dateRef, hangingRef } = await import("../companion/reunion");
+const {
   ASIDE_GAP_MS,
   composeAsideLine,
   decideAside,
   deliverReminder,
   dueRef,
   dueReminderLine,
-} from "../companion/aside";
-import { dateRef, hangingRef, type ReunionDate, type ReunionMatter } from "../companion/reunion";
+} = await import("../companion/aside");
 
 const now = new Date(2026, 9, 15, 12, 0, 0).getTime();
 const HOUR = 60 * 60 * 1000;
@@ -247,4 +258,5 @@ assert.equal(
   "skip",
 );
 
+cleanupOfflineDb(offlineDb);
 console.log("aside checks passed");

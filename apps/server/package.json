@@ -6,7 +6,14 @@
     "dev": "tsx watch src/index.ts",
     "memory:clear": "tsx src/scripts/clear-memories.ts",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "typecheck": "tsc --noEmit --pretty false",
+    "lint": "eslint .",
+    "test:offline": "tsx src/scripts/offline.run.ts",
+    "check:live:prompt": "tsx src/scripts/prompt.live.ts",
+    "check:live:persona": "tsx src/scripts/persona.live.ts",
+    "check:live:meaning": "tsx src/scripts/meaning.live.ts",
+    "check:live:between": "tsx src/scripts/between.live.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",
@@ -25,7 +32,11 @@
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.2",
+    "@eslint/js": "^10.0.1",
     "drizzle-kit": "^0.31.11",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "typescript-eslint": "^8.69.0",
     "tsx": "^4.23.15",
     "typescript": "~6.0.2"
   }

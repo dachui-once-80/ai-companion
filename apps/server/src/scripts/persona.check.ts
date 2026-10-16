@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PERSONA } from "../companion/Persona";
-import { holdSessionView } from "../companion/sessionView";
-import { isPersonaRewrite } from "../companion/ThoughtStore";
+import {
+  assertOfflineDbIsolated,
+  cleanupOfflineDb,
+  prepareOfflineDb,
+} from "./offlineDb.ts";
+
+const offlineDb = prepareOfflineDb("persona-");
+await assertOfflineDbIsolated(offlineDb);
+
+const { holdSessionView } = await import("../companion/sessionView");
+const { isPersonaRewrite } = await import("../companion/ThoughtStore");
 
 const LIFE = /昨晚|昨天|家人|身体|吃过|睡过|我妈|我爸|出门|上班/;
 
@@ -103,9 +112,8 @@ assert.match(instruction, /对具体事情的看法可以跟着经历改，改�
 assert.doesNotMatch(schema, /tastes/);
 assert.doesNotMatch(serverIndex, /\/api\/companion\/(persona|tastes|inner)/);
 
+cleanupOfflineDb(offlineDb);
 console.log("[persona] fixed tastes stay out of the database");
-
-await liveRound();
 
 function bulletList(items: readonly string[]): string {
   return items.map((item) => `- ${item}`).join("\n");
@@ -206,14 +214,17 @@ function deniesLife(text: string): boolean {
   );
 }
 
-async function liveRound(): Promise<void> {
-  const dotenv = await import("dotenv");
-  dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+export async function runLive(): Promise<void> {
+  if (process.env.COMPANION_LIVE_SKIP_DOTENV !== "1") {
+    const dotenv = await import("dotenv");
+    dotenv.config({ path: new URL("../../.env", import.meta.url).pathname });
+  }
 
   const apiKey = process.env.GEMINI_API_KEY?.trim();
 
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is missing");
+    console.error("[persona] live precondition not met: GEMINI_API_KEY is missing");
+    process.exit(1);
   }
 
   const proxy =

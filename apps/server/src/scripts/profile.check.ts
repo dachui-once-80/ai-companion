@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import Database from "better-sqlite3";
+import { prepareOfflineDb } from "./offlineDb.ts";
 import {
   explicitWhenSad,
   normalizeImportantDate,
@@ -33,9 +31,7 @@ assert.deepEqual(parseImportantDate("每年 06-07 结婚纪念日"), {
   label: "结婚纪念日",
 });
 
-const dir = mkdtempSync(join(tmpdir(), "profile-"));
-const file = join(dir, "companion.db");
-process.env.COMPANION_DB = file;
+const file = prepareOfflineDb("profile-");
 
 const sqlite = new Database(file);
 sqlite.exec(`
