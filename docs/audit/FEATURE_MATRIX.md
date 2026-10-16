@@ -172,13 +172,16 @@
 
 待办 CRUD 在 `index.ts`：`GET/POST /api/tasks`，完成和删除。模型工具 `create_task`、`list_tasks`、`complete_task`、`delete_task` 由 `RealtimeClient` 调用这些接口。创建时可带 `dueAt`、`reminderAt`。没写提醒时间则不会进到期队列（`reminderScheduled` 只是响应字段）。
 
-到期：`checkTaskReminders` 每 15 秒把到点项标成 `queued`。`GET /api/tasks/reminders` 用 `deliverReminder`（`apps/server/src/companion/aside.ts`）决定 `speak` 或 `leave`。`App.tsx` 的 `checkReminders` 每 5 秒拉取；语音开着则 `mentionDue`。结果经 `settle` 记为说过，或改成留言。
+到期：`checkTaskReminders` 每 15 秒把到点项标成 `queued`；`speaking` 超过 45 秒退回 `queued`。`GET /api/tasks/reminders` 用 `deliverReminder`（`aside.ts`）决定 `speak` 或 `leave`；speak 领取经 `claimQueuedReminder`（`reminderLease.ts`，工作区未提交）并返回 `claimedAt`。`App.tsx` 每 5 秒拉取；语音开着则 `mentionDue`，再 `POST .../settle`（须带 `claimedAt`；条件 UPDATE）。未听完 Aside 保护见 `shouldProtectUnheardAside`；`heard=false` 且受保护时 settle 可 `deferred`。客户端对 deferred 约 45s 内不重复 `mentionDue`（仍可能每 5s claim 后立刻 settle 释放）。**不保证 exactly-once 播报。**
 
-人不在语音里：`checkAside` 每 15 秒调用 `decideAside`。`aside.check.ts` 审计当日通过，覆盖「语音开着不留」「未听完的留言不覆盖」「三小时内不留」（**未在本次修订重跑**）。
+人不在语音里：`checkAside` 每 15 秒调用 `decideAside`。`aside.check.ts` / `reminder-leave.check.ts`（工作区）覆盖未听完保护相关断言。
 
 Gemini `proactiveAudio: true` 允许模型在会话里主动出声。这依赖 Live 会话还连着。
 
-缺口：没有 cron 守护进程，没有邮件、短信或 Web Push。浏览器通知不申请权限。服务端进程停了，15 秒扫描也停，到点项要等进程再起来才会入队。`voiceSessions` 不计浏览器标签，只计本进程上的 Live 代理连接。
+缺口：没有 cron 守护进程，没有邮件、短信或 Web Push。浏览器通知不申请权限。服务端进程停了，15 秒扫描也停，到点项要等进程再起来才会入队。`voiceSessions` 不计浏览器标签，只计本进程上的 Live 代理连接（工作区：计数为上游就绪会话）。
+
+**阶段 6 收尾时仍未验证：** 真实浏览器双标签、真实 Gemini Live、响应丢失端到端、播报中点完成、多进程并行 settle。
+**非阻塞 P2：** 完成任务刷新 `updatedAt` 可能弄脏 speaking 租约；deferred 仍有约 5s 服务端 claim/settle 环。
 
 ## 语音输入和输出
 
@@ -193,7 +196,7 @@ Gemini `proactiveAudio: true` 允许模型在会话里主动出声。这依赖 L
 - 播放：输出 `AudioContext({ sampleRate: 24000 })`，`audio_playback_started` 把界面设为「正在说」
 - 打断：`playback_interrupted` 把未说完的句子记进 `lastTalk`
 
-传输：浏览器 → Vite 或同源 `/api/gemini/live-proxy` → `index.ts` 的 `WebSocketServer` → Gemini。代理未连通时最多缓冲 32 条，多了就丢。
+传输：浏览器 → Vite 或同源 `/api/gemini/live-proxy` → `WebSocketServer` →（工作区）`liveProxyBridge` → Gemini。缓冲满/超时/会话生命周期见阶段 1 未提交实现与 `live-proxy.check.ts`；**不是**真实 Gemini Live 端到端门禁。
 
 工具接话：`asides.ts` 的 `asideLineFor` 在天气、搜索等慢工具前播放预录 PCM，避免干等。这和「她留下的」留言不是同一功能。留言是文本，在 `AsideStore`。
 
@@ -271,15 +274,16 @@ Gemini `proactiveAudio: true` 允许模型在会话里主动出声。这依赖 L
 
 状态：部分（`6da4466` 起）。
 
-`pnpm --filter server test:offline`（`offline.run.ts`）在子进程里为各脚本准备临时 `COMPANION_DB`，并用 `offlineGuard` / `offlineDb` 拒绝指向真实开发库的路径（含部分符号链接 / hardlink 情形）。其中 `rename.check.ts`（`0bdecb0`）会对隔离库起本地 HTTP，断言改名校验与持久化。
+`pnpm --filter server test:offline`（`offline.run.ts`）在子进程里为各脚本准备临时 `COMPANION_DB`，并用 `offlineGuard` / `offlineDb` 拒绝指向真实开发库的路径（含部分符号链接 / hardlink 情形）。其中 `rename.check.ts`（`0bdecb0`）会对隔离库起本地 HTTP，断言改名校验与持久化。工作区另挂 `live-proxy.check.ts`、`reminder-leave.check.ts`、`reminder-claim.check.ts`（调用生产 `settleReminderFromBody`）。
+
+根 `package.json`（工作区未提交）另有：`check:web:live-session`、`check:web:audio-playback`、`check:web:connection-feedback`、`check:web:reminder-client`、`check:web:due-wait`、`check:server:reminder-claim`，以及聚合 `pnpm check`。
 
 这**不是**：
 
 - 对正在运行的生产/开发 `index.ts` 长进程做的全套件；
 - 对「所有可能误连生产库」场景的穷尽证明；
-- Gemini 在线可用性门禁。
-
-组 C 提交前核验曾报告 `test:offline` 与 `check:identity-race` 等退出码为 0；**撰写本矩阵修订时未重新执行**。
+- Gemini 在线可用性门禁；
+- 真实浏览器双标签或 Live 通话端到端。
 
 ### 在线 / 供应商相关
 

@@ -8,6 +8,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "check:identity-race": "tsx scripts/identity-race.check.ts",
+    "check:live-session-lifecycle": "tsx scripts/live-session-lifecycle.check.ts",
+    "check:audio-playback": "tsx scripts/audio-playback.check.ts",
+    "check:connection-feedback": "tsx scripts/connection-feedback.check.ts",
+    "check:reminder-client": "tsx scripts/reminder-client.check.ts",
+    "check:due-wait": "tsx scripts/due-wait.check.ts",
     "preview": "vite preview"
   },
   "dependencies": {

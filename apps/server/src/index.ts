@@ -15,8 +15,12 @@ import {
   decideAside,
   deliverReminder,
   dueRef,
-  dueReminderLine,
+  shouldProtectUnheardAside,
 } from "./companion/aside";
+import {
+  claimQueuedReminder,
+  settleReminderFromBody,
+} from "./companion/reminderLease";
 import { buildReunionOpening } from "./companion/reunion";
 import { Companion } from "./companion/Companion";
 import { registerCompanionIdentityRoutes } from "./companion/identityRoutes";
@@ -49,6 +53,11 @@ import type {
   MemoryCategory,
   MemoryImportance,
 } from "./memory/MemoryTypes";
+import {
+  bindLiveProxyPair,
+  closeSocketQuietly,
+  createVoiceSessionCounter,
+} from "./gemini/liveProxyBridge";
 
 /**
  * =========================================================
@@ -803,7 +812,28 @@ app.delete("/api/tasks/:id", (req, res) => {
 // 每 15 秒检查一次是否有到期提醒，以及人没在语音里时要不要留一句话
 let reminderCheckRunning = false;
 let asideCheckRunning = false;
-let voiceSessions = 0;
+
+// voiceSessions = 上游 Gemini 已就绪的会话数（不是代理刚 accept）。
+const voiceSessionCounter = createVoiceSessionCounter();
+const voiceSessions = {
+  begin() {
+    voiceSessionCounter.begin();
+  },
+  end() {
+    voiceSessionCounter.end();
+
+    if (voiceSessionCounter.count() > 0) return;
+
+    try {
+      asideStore.setAwayAt(new Date().toISOString());
+    } catch (error) {
+      console.error("[Aside] failed to note voice left:", error);
+    }
+  },
+  count() {
+    return voiceSessionCounter.count();
+  },
+};
 
 async function checkTaskReminders() {
   if (reminderCheckRunning) return;
@@ -879,7 +909,7 @@ function checkAside() {
     const current = asideStore.current();
     const choice = decideAside({
       nowMs: Date.now(),
-      voiceOpen: voiceSessions > 0,
+      voiceOpen: voiceSessions.count() > 0,
       awayAt: asideStore.awayAt() ?? affectStore.peekLastSeen(),
       unheard: current !== null && !current.heard,
       unresolved: thoughtStore.list("unresolved"),
@@ -920,35 +950,6 @@ setInterval(() => {
 }, 15_000);
 
 const server = http.createServer(app);
-function closeQuietly(
-  socket: WebSocket,
-  code?: number,
-  reason?: string,
-): void {
-  if (
-    socket.readyState !== WebSocket.OPEN &&
-    socket.readyState !== WebSocket.CONNECTING
-  ) {
-    return;
-  }
-
-  const safeCode =
-    code !== undefined &&
-    code >= 1000 &&
-    code <= 4999 &&
-    code !== 1004 &&
-    code !== 1005 &&
-    code !== 1006 &&
-    code !== 1015
-      ? code
-      : 1000;
-
-  try {
-    socket.close(safeCode, (reason ?? "").slice(0, 120));
-  } catch (error) {
-    console.error("[Gemini Live Proxy] close failed:", error);
-  }
-}
 
 const liveProxyWss = new WebSocketServer({ noServer: true });
 
@@ -964,92 +965,22 @@ server.on("upgrade", (request, socket, head) => {
   const upstreamUrl = `${GEMINI_WS_ORIGIN}${upstreamPath}`;
 
   liveProxyWss.handleUpgrade(request, socket, head, (client) => {
-    voiceSessions += 1;
-    let voiceEnded = false;
-    const endVoice = () => {
-      if (voiceEnded) return;
-
-      voiceEnded = true;
-      voiceSessions = Math.max(0, voiceSessions - 1);
-
-      if (voiceSessions > 0) return;
-
-      try {
-        asideStore.setAwayAt(new Date().toISOString());
-      } catch (error) {
-        console.error("[Aside] failed to note voice left:", error);
-      }
-    };
-    client.on("close", endVoice);
-
-    const pending: Array<{
-      data: WebSocket.RawData;
-      isBinary: boolean;
-    }> = [];
-
     const upstream = new WebSocket(upstreamUrl, {
       agent: liveProxyAgent,
     });
 
-    const flushPending = () => {
-      for (const message of pending) {
-        if (upstream.readyState === WebSocket.OPEN) {
-          upstream.send(message.data, { binary: message.isBinary });
-        }
-      }
-      pending.length = 0;
-    };
-
-    client.on("message", (data, isBinary) => {
-      if (upstream.readyState === WebSocket.OPEN) {
-        upstream.send(data, { binary: isBinary });
-        return;
-      }
-
-      if (
-        upstream.readyState === WebSocket.CONNECTING &&
-        pending.length < 32
-      ) {
-        pending.push({ data, isBinary });
-      }
-    });
-
-    upstream.on("open", () => {
-      console.log("[Gemini Live Proxy] upstream connected");
-      flushPending();
-    });
-
-    upstream.on("message", (data, isBinary) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(data, { binary: isBinary });
-      }
-    });
-
-    const closeBoth = (code?: number, reason?: string) => {
-      closeQuietly(client, code, reason);
-      closeQuietly(upstream, code, reason);
-    };
-
-    client.on("close", (code, reason) => {
-      closeQuietly(upstream, code, reason.toString());
-    });
-
-    upstream.on("close", (code, reason) => {
-      console.warn("[Gemini Live Proxy] upstream closed:", {
-        code,
-        reason: reason.toString(),
-      });
-      closeQuietly(client, code, reason.toString());
-    });
-
-    client.on("error", (error) => {
-      console.error("[Gemini Live Proxy] client error:", error);
-      closeBoth(1011, "client error");
-    });
-
-    upstream.on("error", (error) => {
-      console.error("[Gemini Live Proxy] upstream error:", error);
-      closeBoth(1011, "upstream error");
+    bindLiveProxyPair({
+      client,
+      upstream,
+      voice: voiceSessions,
+      closeQuietly: closeSocketQuietly,
+      onUpstreamOpen: () => {
+        console.log("[Gemini Live Proxy] upstream connected");
+      },
+      onClosed: (reason) => {
+        if (!reason) return;
+        console.warn("[Gemini Live Proxy] pair closed:", reason.slice(0, 120));
+      },
     });
   });
 });
@@ -1887,34 +1818,6 @@ app.post("/api/memory/forget", (req, res) => {
   }
 });
 
-function claimQueuedReminder(id: string, next: "speaking" | "true"): boolean {
-  const claimed = db
-    .update(tasks)
-    .set({
-      reminderSent: next,
-      updatedAt: new Date().toISOString(),
-    })
-    .where(
-      and(
-        eq(tasks.id, id),
-        eq(tasks.reminderSent, "queued"),
-      ),
-    )
-    .run();
-
-  return claimed.changes > 0;
-}
-
-function finishReminder(id: string): void {
-  db.update(tasks)
-    .set({
-      reminderSent: "true",
-      updatedAt: new Date().toISOString(),
-    })
-    .where(eq(tasks.id, id))
-    .run();
-}
-
 // 到期的提醒：人在语音里交给她说，人不在就留下那一句。
 app.get("/api/tasks/reminders", async (req, res) => {
   const voiceOpen = req.query.voice === "1";
@@ -1931,6 +1834,7 @@ app.get("/api/tasks/reminders", async (req, res) => {
       line: string;
       delivery: "speak" | "left";
       leftAt?: string;
+      claimedAt?: string;
     }> = [];
 
     for (const task of queuedTasks) {
@@ -1953,6 +1857,16 @@ app.get("/api/tasks/reminders", async (req, res) => {
       }
 
       if (delivery.action === "leave") {
+        // 未听完的 aside 仍在有效期内：不覆盖、不领取，保持 queued 稍后重试。
+        if (
+          shouldProtectUnheardAside({
+            current: asideStore.current(),
+            nowMs: Date.now(),
+          })
+        ) {
+          continue;
+        }
+
         if (!claimQueuedReminder(task.id, "true")) continue;
 
         const leftAt = new Date().toISOString();
@@ -1973,13 +1887,15 @@ app.get("/api/tasks/reminders", async (req, res) => {
         continue;
       }
 
-      if (!claimQueuedReminder(task.id, "speaking")) continue;
+      const claimedAt = claimQueuedReminder(task.id, "speaking");
+      if (!claimedAt) continue;
 
       console.log("[Reminder] speak", delivery.line);
       reminders.push({
         id: task.id,
         line: delivery.line,
         delivery: "speak",
+        claimedAt,
       });
     }
 
@@ -1996,63 +1912,8 @@ app.get("/api/tasks/reminders", async (req, res) => {
   }
 });
 
-// 语音里说完，记一笔已经说过。没说出来，就改成留下的那一句。
+// 语音里说完 / 没说成留下：租约逻辑见 reminderLease.settleReminderFromBody。
 app.post("/api/tasks/reminders/settle", (req, res) => {
-  const body = req.body as { id?: unknown; heard?: unknown };
-
-  if (typeof body.id !== "string" || !body.id.trim()) {
-    res.status(400).json({ success: false, error: "id is required" });
-    return;
-  }
-
-  if (typeof body.heard !== "boolean") {
-    res.status(400).json({ success: false, error: "heard must be a boolean" });
-    return;
-  }
-
-  try {
-    const task = db
-      .select()
-      .from(tasks)
-      .where(eq(tasks.id, body.id.trim()))
-      .get();
-
-    if (!task) {
-      res.status(404).json({ success: false, error: "未找到待办" });
-      return;
-    }
-
-    const matter = {
-      id: task.id,
-      title: task.title,
-      dueAt: task.dueAt,
-      reminderAt: task.reminderAt,
-    };
-    const ref = dueRef(matter);
-    const line = dueReminderLine(task.title);
-    let leftAt: string | null = null;
-
-    if (body.heard) {
-      asideStore.noteSpoken(ref.key, ref.revision);
-    } else if (line && !asideStore.hasSpoken(ref.key, ref.revision)) {
-      leftAt = new Date().toISOString();
-      asideStore.leave({
-        text: line,
-        leftAt,
-        matterKey: ref.key,
-        matterRevision: ref.revision,
-      });
-      console.log("[Reminder] left", line);
-    }
-
-    finishReminder(task.id);
-    res.json({
-      success: true,
-      line: leftAt ? line : null,
-      leftAt,
-    });
-  } catch (error) {
-    console.error("[Reminder] settle failed:", error);
-    res.status(500).json({ success: false, error: "记录提醒结果失败" });
-  }
+  const result = settleReminderFromBody(req.body);
+  res.status(result.status).json(result.json);
 });

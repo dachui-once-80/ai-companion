@@ -18,6 +18,7 @@ const {
   deliverReminder,
   dueRef,
   dueReminderLine,
+  shouldProtectUnheardAside,
 } = await import("../companion/aside");
 
 const now = new Date(2026, 9, 15, 12, 0, 0).getTime();
@@ -256,6 +257,43 @@ assert.equal(
     alreadySpoken: false,
   }).action,
   "skip",
+);
+
+// --- D2：未听完 aside 保护与过期后可替换（避免提醒永久饥饿）---
+assert.equal(
+  shouldProtectUnheardAside({
+    current: null,
+    nowMs: now,
+  }),
+  false,
+);
+assert.equal(
+  shouldProtectUnheardAside({
+    current: { heard: true, leftAt: at(0) },
+    nowMs: now,
+  }),
+  false,
+);
+assert.equal(
+  shouldProtectUnheardAside({
+    current: { heard: false, leftAt: at(HOUR) },
+    nowMs: now,
+  }),
+  true,
+);
+assert.equal(
+  shouldProtectUnheardAside({
+    current: { heard: false, leftAt: at(ASIDE_GAP_MS) },
+    nowMs: now,
+  }),
+  false,
+);
+assert.equal(
+  shouldProtectUnheardAside({
+    current: { heard: false, leftAt: at(ASIDE_GAP_MS + HOUR) },
+    nowMs: now,
+  }),
+  false,
 );
 
 cleanupOfflineDb(offlineDb);

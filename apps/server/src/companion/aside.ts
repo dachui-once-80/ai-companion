@@ -167,6 +167,29 @@ export function deliverReminder(input: {
   };
 }
 
+/**
+ * 未听完的留言是否仍应挡住 reminder leave。
+ * - heard 或没有 current → 不挡
+ * - 未听完且未超过 replaceAfterMs（默认 ASIDE_GAP_MS）→ 挡，避免静默覆盖
+ * - 未听完但已超过空档 → 可替换，避免提醒永久饥饿
+ */
+export function shouldProtectUnheardAside(input: {
+  current: { heard: boolean; leftAt: string } | null;
+  nowMs: number;
+  replaceAfterMs?: number;
+}): boolean {
+  if (!input.current || input.current.heard) return false;
+
+  const leftAt = Date.parse(input.current.leftAt);
+
+  if (!Number.isFinite(leftAt)) return false;
+
+  const ttl = input.replaceAfterMs ?? ASIDE_GAP_MS;
+  const age = input.nowMs - leftAt;
+
+  return age < ttl;
+}
+
 function rankCandidates(input: {
   nowMs: number;
   unresolved: readonly ReunionMatter[];

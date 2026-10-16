@@ -10,7 +10,13 @@
     "check:server:type": "pnpm --filter server typecheck",
     "check:server:lint": "pnpm --filter server lint",
     "check:offline": "pnpm --filter server test:offline",
-    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline"
+    "check:web:live-session": "pnpm --filter web check:live-session-lifecycle",
+    "check:web:audio-playback": "pnpm --filter web check:audio-playback",
+    "check:web:connection-feedback": "pnpm --filter web check:connection-feedback",
+    "check:web:reminder-client": "pnpm --filter web check:reminder-client",
+    "check:web:due-wait": "pnpm --filter web check:due-wait",
+    "check:server:reminder-claim": "pnpm --filter server exec tsx src/scripts/reminder-claim.check.ts",
+    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {

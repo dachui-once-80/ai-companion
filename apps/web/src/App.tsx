@@ -2,7 +2,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import MemoryPanel from "./memory/MemoryPanel";
 import { formatDate } from "./formatDate";
+import {
+  noticeForConnectError,
+  resolveCloseFeedback,
+  resolveConnectCatch,
+} from "./connectionFeedback";
 import { createIdentityGate } from "./identityLoad";
+import {
+  classifySettleHttpResult,
+  markDeferredBackoff,
+  nextPendingAfterUncertain,
+  planReminderBatch,
+  resolveAfterMentionDue,
+  resolveMentionDueThrow,
+  type PendingSettle,
+} from "./reminderClient";
 import {
   parseCompanionAffect,
   RealtimeClient,
@@ -92,7 +106,14 @@ function App() {
   const voiceOpenRef = useRef(false);
   const handledReminderIds = useRef<Set<string>>(new Set());
   const spokenReminderIds = useRef<Set<string>>(new Set());
-  const pendingSettle = useRef<Array<{ id: string; heard: boolean }>>([]);
+  const inFlightReminderIds = useRef<Set<string>>(new Set());
+  const pendingSettle = useRef<PendingSettle[]>([]);
+  /** speak 领取时的 claimedAt，供 settle 防陈旧租约 */
+  const reminderClaimAt = useRef<Map<string, string>>(new Map());
+  /** settle 有界重试耗尽：仍靠 spoken 防重播，不再请求 settle */
+  const settleGaveUpIds = useRef<Set<string>>(new Set());
+  /** Aside deferred 退避：id → 可再次 mentionDue 的时间 */
+  const deferredUntil = useRef<Map<string, number>>(new Map());
   const [leftNote, setLeftNote] = useState<{
     text: string;
     leftAt: string;
@@ -333,25 +354,76 @@ function App() {
     let active = true;
     let checking = false;
 
-    const settleReminder = async (id: string, heard: boolean) => {
-      const response = await fetch("/api/tasks/reminders/settle", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, heard }),
+    const settleReminder = async (
+      id: string,
+      heard: boolean,
+      claimedAt?: string,
+    ) => {
+      const body: { id: string; heard: boolean; claimedAt?: string } = {
+        id,
+        heard,
+      };
+      const claim = claimedAt ?? reminderClaimAt.current.get(id);
+      if (claim) body.claimedAt = claim;
+
+      let response: Response;
+
+      try {
+        response = await fetch("/api/tasks/reminders/settle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch {
+        return { kind: "uncertain" as const, line: "", leftAt: "" };
+      }
+
+      let data: unknown;
+
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      const deferred =
+        !!data &&
+        typeof data === "object" &&
+        "deferred" in data &&
+        data.deferred === true;
+      const stale =
+        !!data &&
+        typeof data === "object" &&
+        "stale" in data &&
+        data.stale === true;
+
+      const kind = classifySettleHttpResult({
+        ok: response.ok,
+        status: response.status,
+        deferred,
+        stale,
       });
 
-      if (!response.ok) return null;
-
-      const data: unknown = await response.json();
-
-      if (!data || typeof data !== "object") return null;
+      if (kind !== "ok") {
+        return { kind, line: "", leftAt: "" };
+      }
 
       const line =
-        "line" in data && typeof data.line === "string" ? data.line.trim() : "";
+        data &&
+        typeof data === "object" &&
+        "line" in data &&
+        typeof data.line === "string"
+          ? data.line.trim()
+          : "";
       const leftAt =
-        "leftAt" in data && typeof data.leftAt === "string" ? data.leftAt : "";
+        data &&
+        typeof data === "object" &&
+        "leftAt" in data &&
+        typeof data.leftAt === "string"
+          ? data.leftAt
+          : "";
 
-      return { line, leftAt };
+      return { kind, line, leftAt };
     };
 
     const showHerLine = (line: string, leftAt: string) => {
@@ -372,21 +444,58 @@ function App() {
       checking = true;
 
       try {
-        const stillPending: Array<{ id: string; heard: boolean }> = [];
+        const stillPending: PendingSettle[] = [];
 
         for (const item of pendingSettle.current) {
           try {
-            const settled = await settleReminder(item.id, item.heard);
+            const settled = await settleReminder(
+              item.id,
+              item.heard,
+              item.claimedAt,
+            );
 
-            if (!settled) {
-              stillPending.push(item);
+            if (settled.kind === "uncertain") {
+              const next = nextPendingAfterUncertain(item);
+              if (next) {
+                stillPending.push(next);
+              } else if (item.heard) {
+                settleGaveUpIds.current.add(item.id);
+              } else {
+                reminderClaimAt.current.delete(item.id);
+              }
               continue;
             }
 
-            if (!item.heard) showHerLine(settled.line, settled.leftAt);
+            if (settled.kind === "deferred") {
+              reminderClaimAt.current.delete(item.id);
+              settleGaveUpIds.current.delete(item.id);
+              markDeferredBackoff(deferredUntil.current, item.id, Date.now());
+              continue;
+            }
+
+            if (settled.kind === "stale") {
+              reminderClaimAt.current.delete(item.id);
+              settleGaveUpIds.current.delete(item.id);
+              deferredUntil.current.delete(item.id);
+              continue;
+            }
+
+            handledReminderIds.current.add(item.id);
+            reminderClaimAt.current.delete(item.id);
+            settleGaveUpIds.current.delete(item.id);
+            deferredUntil.current.delete(item.id);
+
+            if (item.heard) {
+              spokenReminderIds.current.add(item.id);
+            } else if (settled.line) {
+              showHerLine(settled.line, settled.leftAt);
+            }
           } catch (error) {
             console.error("[Reminder] 补记提醒失败", error);
-            stillPending.push(item);
+            const next = nextPendingAfterUncertain(item);
+            if (next) stillPending.push(next);
+            else if (item.heard) settleGaveUpIds.current.add(item.id);
+            else reminderClaimAt.current.delete(item.id);
           }
         }
 
@@ -407,69 +516,251 @@ function App() {
             line: string;
             delivery: "speak" | "left";
             leftAt?: string;
+            claimedAt?: string;
           }>;
         } = await response.json();
 
         if (!active || !data.success || !data.reminders) return;
 
-        const toSpeak: Array<{ id: string; line: string }> = [];
-
         for (const reminder of data.reminders) {
-          if (spokenReminderIds.current.has(reminder.id)) {
-            try {
-              const settled = await settleReminder(reminder.id, true);
+          if (reminder.delivery === "speak" && reminder.claimedAt) {
+            reminderClaimAt.current.set(reminder.id, reminder.claimedAt);
+          }
+        }
 
-              if (!settled) {
-                pendingSettle.current.push({ id: reminder.id, heard: true });
-              }
-            } catch (error) {
-              console.error("[Reminder] 补记已说提醒失败", error);
-              pendingSettle.current.push({ id: reminder.id, heard: true });
-            }
+        const plan = planReminderBatch({
+          reminders: data.reminders,
+          spoken: spokenReminderIds.current,
+          handled: handledReminderIds.current,
+          inFlight: inFlightReminderIds.current,
+          pendingSettleIds: new Set(
+            pendingSettle.current.map((item) => item.id),
+          ),
+          settleGaveUp: settleGaveUpIds.current,
+          deferredUntil: deferredUntil.current,
+          nowMs: Date.now(),
+        });
+
+        // deferred 退避中又被 claim：只释放租约，不 mentionDue。
+        for (const item of plan.releaseDeferred) {
+          const settled = await settleReminder(
+            item.id,
+            false,
+            item.claimedAt,
+          );
+
+          if (settled.kind === "ok") {
+            handledReminderIds.current.add(item.id);
+            reminderClaimAt.current.delete(item.id);
+            deferredUntil.current.delete(item.id);
+            if (settled.line) showHerLine(settled.line, settled.leftAt);
             continue;
           }
 
-          if (handledReminderIds.current.has(reminder.id)) continue;
-
-          if (reminder.delivery === "left") {
-            handledReminderIds.current.add(reminder.id);
-            showHerLine(reminder.line, reminder.leftAt ?? "");
+          if (settled.kind === "deferred") {
+            markDeferredBackoff(deferredUntil.current, item.id, Date.now());
+            reminderClaimAt.current.delete(item.id);
             continue;
           }
 
-          if (!reminder.line.trim()) continue;
-
-          toSpeak.push({ id: reminder.id, line: reminder.line.trim() });
+          reminderClaimAt.current.delete(item.id);
+          if (settled.kind === "stale") {
+            deferredUntil.current.delete(item.id);
+          }
         }
 
-        if (toSpeak.length === 0) return;
-
-        for (const item of toSpeak) handledReminderIds.current.add(item.id);
-
-        const said =
-          voiceOpenRef.current && clientRef.current
-            ? await clientRef.current.mentionDue(
-                toSpeak.map((item) => item.line),
-              )
-            : false;
-
-        if (said) {
-          for (const item of toSpeak) spokenReminderIds.current.add(item.id);
-        }
-
-        for (const item of toSpeak) {
+        for (const id of plan.settleSpoken) {
           try {
-            const settled = await settleReminder(item.id, said);
+            const settled = await settleReminder(
+              id,
+              true,
+              reminderClaimAt.current.get(id),
+            );
 
-            if (!settled) {
-              pendingSettle.current.push({ id: item.id, heard: said });
+            if (settled.kind === "ok") {
+              handledReminderIds.current.add(id);
+              reminderClaimAt.current.delete(id);
+              settleGaveUpIds.current.delete(id);
               continue;
             }
 
-            if (!said) showHerLine(settled.line, settled.leftAt);
+            if (settled.kind === "stale" || settled.kind === "deferred") {
+              reminderClaimAt.current.delete(id);
+              settleGaveUpIds.current.delete(id);
+              continue;
+            }
+
+            const next = nextPendingAfterUncertain({
+              id,
+              heard: true,
+              claimedAt: reminderClaimAt.current.get(id),
+            });
+            if (next) pendingSettle.current.push(next);
+            else settleGaveUpIds.current.add(id);
           } catch (error) {
-            console.error("[Reminder] 记录提醒结果失败", error);
-            pendingSettle.current.push({ id: item.id, heard: said });
+            console.error("[Reminder] 补记已说提醒失败", error);
+            const next = nextPendingAfterUncertain({
+              id,
+              heard: true,
+              claimedAt: reminderClaimAt.current.get(id),
+            });
+            if (next) pendingSettle.current.push(next);
+            else settleGaveUpIds.current.add(id);
+          }
+        }
+
+        for (const item of plan.showLeft) {
+          handledReminderIds.current.add(item.id);
+          showHerLine(item.line, item.leftAt);
+        }
+
+        const toSpeak = plan.toSpeak;
+
+        if (toSpeak.length === 0) return;
+
+        const claimedAtById = new Map(
+          toSpeak.map((item) => [item.id, item.claimedAt]),
+        );
+
+        for (const item of toSpeak) inFlightReminderIds.current.add(item.id);
+
+        try {
+          let heard = false;
+          let mentionFailed = false;
+
+          try {
+            heard =
+              voiceOpenRef.current && clientRef.current
+                ? await clientRef.current.mentionDue(
+                    toSpeak.map((item) => item.line),
+                  )
+                : false;
+          } catch (error) {
+            console.error("[Reminder] mentionDue failed", error);
+            mentionFailed = true;
+            heard = false;
+          }
+
+          if (mentionFailed) {
+            const thrown = resolveMentionDueThrow(
+              toSpeak.map((item) => item.id),
+              claimedAtById,
+            );
+
+            // 立刻 settle(heard=false) 释放 speaking，不干等 45s。
+            for (const item of thrown.pendingSettle) {
+              const settled = await settleReminder(
+                item.id,
+                false,
+                item.claimedAt,
+              );
+
+              if (settled.kind === "ok") {
+                handledReminderIds.current.add(item.id);
+                reminderClaimAt.current.delete(item.id);
+                settleGaveUpIds.current.delete(item.id);
+                deferredUntil.current.delete(item.id);
+                if (settled.line) showHerLine(settled.line, settled.leftAt);
+                continue;
+              }
+
+              if (settled.kind === "uncertain") {
+                const next = nextPendingAfterUncertain(item);
+                if (next) pendingSettle.current.push(next);
+                else reminderClaimAt.current.delete(item.id);
+                continue;
+              }
+
+              if (settled.kind === "deferred") {
+                reminderClaimAt.current.delete(item.id);
+                settleGaveUpIds.current.delete(item.id);
+                markDeferredBackoff(deferredUntil.current, item.id, Date.now());
+                continue;
+              }
+
+              reminderClaimAt.current.delete(item.id);
+              settleGaveUpIds.current.delete(item.id);
+              if (settled.kind === "stale") {
+                deferredUntil.current.delete(item.id);
+              }
+            }
+
+            return;
+          }
+
+          const settleSucceeded = new Set<string>();
+          const settleDeferred = new Set<string>();
+          const settleStale = new Set<string>();
+          const leftLines = new Map<string, { line: string; leftAt: string }>();
+
+          for (const item of toSpeak) {
+            const settled = await settleReminder(
+              item.id,
+              heard,
+              item.claimedAt,
+            );
+
+            if (settled.kind === "ok") {
+              settleSucceeded.add(item.id);
+              if (!heard && settled.line) {
+                leftLines.set(item.id, {
+                  line: settled.line,
+                  leftAt: settled.leftAt,
+                });
+              }
+              continue;
+            }
+
+            if (settled.kind === "deferred") {
+              settleDeferred.add(item.id);
+              continue;
+            }
+
+            if (settled.kind === "stale") {
+              settleStale.add(item.id);
+            }
+          }
+
+          const outcome = resolveAfterMentionDue({
+            ids: toSpeak.map((item) => item.id),
+            heard,
+            settleSucceeded,
+            settleDeferred,
+            settleStale,
+            claimedAtById,
+          });
+
+          for (const id of outcome.markSpoken) {
+            spokenReminderIds.current.add(id);
+          }
+
+          for (const id of outcome.markHandled) {
+            handledReminderIds.current.add(id);
+            reminderClaimAt.current.delete(id);
+            settleGaveUpIds.current.delete(id);
+            deferredUntil.current.delete(id);
+            const left = leftLines.get(id);
+            if (left) showHerLine(left.line, left.leftAt);
+          }
+
+          for (const id of settleDeferred) {
+            reminderClaimAt.current.delete(id);
+            settleGaveUpIds.current.delete(id);
+            markDeferredBackoff(deferredUntil.current, id, Date.now());
+          }
+
+          for (const id of settleStale) {
+            reminderClaimAt.current.delete(id);
+            settleGaveUpIds.current.delete(id);
+            deferredUntil.current.delete(id);
+          }
+
+          for (const item of outcome.pendingSettle) {
+            pendingSettle.current.push(item);
+          }
+        } finally {
+          for (const item of toSpeak) {
+            inFlightReminderIds.current.delete(item.id);
           }
         }
       } catch (error) {
@@ -554,6 +845,8 @@ function App() {
     const client = new RealtimeClient();
 
     try {
+      // 新一次呼叫：清掉过期失败提示，避免成功后或重试时残留。
+      setNotice("");
       setState("connecting");
       endSession();
       startSession();
@@ -565,6 +858,7 @@ function App() {
       client.setMessageHandler((message) => {
         console.log("[App message]", message);
 
+        // 旧 client 的迟到回调不得改写新连接或取消后的 UI。
         if (clientRef.current !== client) return;
 
         if (message.type === "memory_updated") {
@@ -602,6 +896,7 @@ function App() {
         if (message.type === "connected") {
           holdListeningRef.current = false;
           voiceOpenRef.current = true;
+          setNotice("");
           setState("connected");
           updateVisualState("listening");
         }
@@ -639,6 +934,7 @@ function App() {
           clientRef.current = null;
           endSession();
           setState("error");
+          setNotice(noticeForConnectError(message.error));
           updateVisualState("idle");
           client.disconnect();
           return;
@@ -647,7 +943,8 @@ function App() {
         if (message.type === "disconnected") {
           voiceOpenRef.current = false;
           endSession();
-          setState("idle");
+          // 若已是 error（带失败提示），不要被迟到的 disconnected 盖回 idle。
+          setState((current) => (current === "error" ? current : "idle"));
           updateVisualState("idle");
           return;
         }
@@ -658,16 +955,11 @@ function App() {
           voiceOpenRef.current = false;
           clientRef.current = null;
           endSession();
-          setState("idle");
           updateVisualState("idle");
 
-          if (message.reason?.includes("User location is not supported")) {
-            setNotice(
-              "Gemini 拒绝了当前代理出口 IP。请在 Clash 换一个美国/日本/新加坡节点，打开 /api/gemini/health 确认 ok:true 后再呼叫。",
-            );
-          } else if (message.reason) {
-            setNotice(`连接已断开：${message.reason}`);
-          }
+          const feedback = resolveCloseFeedback(message.reason);
+          setState(feedback.state);
+          if (feedback.notice) setNotice(feedback.notice);
         }
       });
 
@@ -675,6 +967,7 @@ function App() {
 
       if (clientRef.current === client) {
         voiceOpenRef.current = true;
+        setNotice("");
         setState("connected");
         updateVisualState("listening");
       }
@@ -682,12 +975,21 @@ function App() {
       console.error("[Connection] failed", error);
       client.disconnect();
 
-      if (clientRef.current === client) {
-        clientRef.current = null;
-        endSession();
-        setState("error");
-        updateVisualState("idle");
+      const outcome = resolveConnectCatch({
+        isCurrentClient: clientRef.current === client,
+        error,
+      });
+
+      if (outcome.kind === "stale") {
+        // 用户已取消，或 error/closed 已更新 UI；此处不再改状态或提示。
+        return;
       }
+
+      clientRef.current = null;
+      endSession();
+      setState(outcome.state);
+      setNotice(outcome.notice);
+      updateVisualState("idle");
     }
   };
 
@@ -699,6 +1001,8 @@ function App() {
     endSession();
     client?.disconnect();
     setState("idle");
+    // 主动结束 / 取消连接：不保留失败提示，避免被当成意外故障。
+    setNotice("");
     presenceRef.current = "together";
     setPresence("together");
     updateVisualState("idle");

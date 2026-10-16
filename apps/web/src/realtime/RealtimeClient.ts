@@ -16,6 +16,17 @@ import {
   type PresenceDecision,
 } from "./presence";
 import { buildSystemInstruction } from "./systemInstruction";
+import {
+  adoptOrReleaseLiveSession,
+  releaseLiveSession,
+} from "./liveSessionLifecycle";
+import {
+  AudioSessionError,
+  createChunkFaultWarner,
+  preparePlaybackChunk,
+  resolveStartFailure,
+} from "./audioPlayback";
+import { cancelDueWaitSlots, finishDueWaitSlots } from "./dueWait";
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -881,6 +892,11 @@ export class RealtimeClient {
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
 
+  // 坏音频块限频日志：只记错误码，不记 PCM / 转写内容。
+  private readonly warnChunkFault = createChunkFaultWarner((message) => {
+    console.warn(message);
+  });
+
   setMessageHandler(handler: MessageHandler): void {
     this.messageHandler = handler;
   }
@@ -946,17 +962,34 @@ export class RealtimeClient {
   }
 
   private finishDueWait(heard: boolean): void {
-    if (this.dueTimer !== null) {
-      window.clearTimeout(this.dueTimer);
-      this.dueTimer = null;
-    }
+    const slots = finishDueWaitSlots(
+      { timer: this.dueTimer, resolve: this.dueHeard },
+      heard,
+      (id) => {
+        window.clearTimeout(id);
+      },
+    );
 
-    const finish = this.dueHeard;
-    this.dueHeard = null;
+    this.dueTimer = slots.timer;
+    this.dueHeard = slots.resolve;
 
     if (!heard) this.dueRelease = false;
+  }
 
-    finish?.(heard);
+  /** 断开/cleanup：立刻结束 mentionDue，且不得报告 heard=true。 */
+  private cancelDueWait(): void {
+    const slots = cancelDueWaitSlots(
+      { timer: this.dueTimer, resolve: this.dueHeard },
+      (id) => {
+        window.clearTimeout(id);
+      },
+    );
+
+    this.dueTimer = slots.timer;
+    this.dueHeard = slots.resolve;
+    this.dueRelease = false;
+    this.dueWatch = [];
+    this.dueOutput = "";
   }
 
   private noteDueOutput(text: string): void {
@@ -1234,13 +1267,19 @@ export class RealtimeClient {
         },
       });
 
-      if (!this.isCurrentConnection(generation)) {
-        // 连接请求返回时已经被用户取消。
-        // 不启动麦克风，也不接管旧连接的状态。
+      const adopted = adoptOrReleaseLiveSession({
+        session,
+        isCurrent: this.isCurrentConnection(generation),
+        assign: (next) => {
+          this.session = next as Session;
+        },
+      });
+
+      if (!adopted) {
+        // 迟到的 connect 结果已在 adoptOrRelease 中 close，不得再开麦或改状态。
         return;
       }
 
-      this.session = session;
       this.cueReunion(generation);
 
       await this.startMicrophone(generation);
@@ -3402,22 +3441,6 @@ export class RealtimeClient {
     return btoa(binary);
   }
 
-  private base64ToInt16(base64: string): Int16Array {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-
-    // 避免奇数长度的 PCM 数据造成越界或 RangeError。
-    if (bytes.length % 2 !== 0) {
-      throw new Error("收到的 PCM 音频数据长度不是偶数");
-    }
-
-    return new Int16Array(bytes.buffer);
-  }
-
   /*
    * Audio playback
    */
@@ -3520,6 +3543,11 @@ export class RealtimeClient {
 
     try {
       await context.resume();
+    } catch (error) {
+      // resume 失败通常意味着设备/上下文不可用，属会话级，不得当坏块吞掉。
+      throw new AudioSessionError("AudioContext resume failed", {
+        cause: error,
+      });
     } finally {
       this.playAudioInFlight--;
     }
@@ -3538,29 +3566,50 @@ export class RealtimeClient {
       return false;
     }
 
+    if (context.state === "closed") {
+      throw new AudioSessionError("AudioContext is closed");
+    }
+
+    const prepared = preparePlaybackChunk(base64);
+
+    if (prepared.action === "skip") {
+      this.warnChunkFault(prepared.code);
+      this.finishTurnIfReady(generation);
+      return false;
+    }
+
+    const pcm = prepared.samples;
+
     if (!options?.aside) {
       this.resultAudioQueued = true;
     }
 
-    const pcm = this.base64ToInt16(base64);
+    let source: AudioBufferSourceNode;
+    const durationSec = pcm.length / 24000;
 
-    if (pcm.length === 0) return false;
+    try {
+      const buffer = context.createBuffer(1, pcm.length, 24000);
+      const channel = buffer.getChannelData(0);
 
-    const buffer = context.createBuffer(
-      1,
-      pcm.length,
-      24000,
-    );
+      for (let i = 0; i < pcm.length; i++) {
+        channel[i] = pcm[i]! / 32768;
+      }
 
-    const channel = buffer.getChannelData(0);
+      source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+    } catch (error) {
+      this.finishTurnIfReady(generation);
 
-    for (let i = 0; i < pcm.length; i++) {
-      channel[i] = pcm[i] / 32768;
+      if (resolveStartFailure(error, context.state) === "skip") {
+        this.warnChunkFault("buffer_create_failed");
+        return false;
+      }
+
+      throw new AudioSessionError("Audio buffer create failed", {
+        cause: error,
+      });
     }
-
-    const source = context.createBufferSource();
-    source.buffer = buffer;
-    source.connect(context.destination);
 
     const startTime = Math.max(
       context.currentTime,
@@ -3607,7 +3656,7 @@ export class RealtimeClient {
 
     try {
       source.start(startTime);
-      this.nextOutputTime = startTime + buffer.duration;
+      this.nextOutputTime = startTime + durationSec;
       return true;
     } catch (error) {
       source.onended = null;
@@ -3621,7 +3670,15 @@ export class RealtimeClient {
       }
 
       this.finishTurnIfReady(generation);
-      throw error;
+
+      if (resolveStartFailure(error, context.state) === "skip") {
+        this.warnChunkFault("source_start_failed");
+        return false;
+      }
+
+      throw new AudioSessionError("Audio source start failed", {
+        cause: error,
+      });
     }
   }
 
@@ -3652,6 +3709,9 @@ export class RealtimeClient {
 
     this.socketConnected = false;
     this.connecting = false;
+
+    // 结束 mentionDue 等待，避免提醒轮询卡满 12s；取消 ≠ heard。
+    this.cancelDueWait();
 
     this.turnCompletePending = false;
     this.speakingNotified = false;
@@ -3761,10 +3821,15 @@ export class RealtimeClient {
 
     const inputContext = this.inputContext;
     const outputContext = this.outputContext;
+    const session = this.session;
 
     this.inputContext = null;
     this.outputContext = null;
     this.session = null;
+
+    // 先关 Live WS（浏览器→代理），再关 AudioContext。
+    // Session.close() 只关底层 conn；重复/已关闭时由 releaseLiveSession 吞掉异常。
+    releaseLiveSession(session);
 
     const task = (async () => {
       const closeTasks: Promise<void>[] = [];

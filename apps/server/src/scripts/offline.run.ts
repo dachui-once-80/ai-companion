@@ -17,6 +17,9 @@ const scripts = [
   "src/scripts/live-precondition.check.ts",
   "src/scripts/offline-negative.check.ts",
   "src/scripts/rename.check.ts",
+  "src/scripts/live-proxy.check.ts",
+  "src/scripts/reminder-leave.check.ts",
+  "src/scripts/reminder-claim.check.ts",
 ];
 
 let failed = 0;

@@ -172,7 +172,15 @@ Web lint 审计当日指出的两处（行号以当时文件为准，**未在本
 - 日志可能打印转写与记忆内容；health/token 错误信息暴露问题。
 - 双基址（`localhost:3000` vs 相对 `/api`）、无用户隔离等产品/工程缺口。
 
+### 未提交工作区：阶段 1–6（相对 HEAD，2026-10-16 收尾）
+
+阶段 1–6 稳定性改动仍在工作区、**尚未 commit**。第 6 阶段审查通过并允许收尾；不开始第 7 阶段。要点与限制见 `ARCHITECTURE.md`「未提交工作区：阶段 1–6」与 `FEATURE_MATRIX.md` 主动消息节。
+
+**非阻塞 P2：**（1）完成待办刷新 `updatedAt` 可能使 speaking 租约 stale；（2）Aside deferred 后仍可能约每 5s 服务端 claim/settle 环（客户端已退避 `mentionDue`）。
+
+**明确未验证：** 真实浏览器双标签、真实 Gemini Live、响应丢失端到端、播报中点完成、多进程并行 settle。
+
 ### 文档修订时引用过的后续核验（非本文件写作日重跑）
 
-组 C（`0bdecb0`）提交前的对话核验曾报告下列命令退出码为 0（完整权限下）：`pnpm --filter server test:offline`、`pnpm check:server:type`、`pnpm check:server:lint`、`pnpm --filter web exec tsc -b --pretty false`、`pnpm --filter web lint`、`pnpm --filter web build`、`pnpm --filter web check:identity-race`。当时工作区根 `package.json` 里曾有过 `check:web:*` 别名指向上述 web 检查，但那些别名**并未提交到当前 HEAD**（HEAD 根脚本仅有 `dev:*`、`check:server:*`、`check:offline`）。
-**撰写/修订本审计文档时未重新执行上述命令；若需证明 HEAD 此刻仍通过，应另行跑一遍。**
+组 C（`0bdecb0`）提交前的对话核验曾报告下列命令退出码为 0（完整权限下）：`pnpm --filter server test:offline`、`pnpm check:server:type`、`pnpm check:server:lint`、`pnpm --filter web exec tsc -b --pretty false`、`pnpm --filter web lint`、`pnpm --filter web build`、`pnpm --filter web check:identity-race`。当时工作区根 `package.json` 里曾有过 `check:web:*` 别名指向上述 web 检查，但那些别名**并未提交到当前 HEAD**（HEAD 根脚本仅有 `dev:*`、`check:server:*`、`check:offline`）。工作区（未提交）已扩展根脚本与 `pnpm check` 聚合。
+**若需证明当前工作区检查仍通过，以第 6 阶段收尾报告中的当次命令结果为准。**

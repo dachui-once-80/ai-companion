@@ -1,6 +1,6 @@
 # 当前架构
 
-初稿审计日期：2026-10-15。本文在对照 HEAD `3e9dd05` 后做了局部修订；未改动的段落仍以当时读到的调用链为准。进程有两个：Vite 开发服务器（5173）和 Express（3000）。生产构建只打包前端；服务端仍用 `tsx` 跑 `apps/server/src/index.ts`。
+初稿审计日期：2026-10-15。本文在对照 HEAD `3e9dd05` 后做了局部修订；**工作区另有未提交的阶段 1–6 稳定性改动**（见文末「未提交工作区：阶段 1–6」）。未改动的段落仍以当时读到的调用链为准。进程有两个：Vite 开发服务器（5173）和 Express（3000）。生产构建只打包前端；服务端仍用 `tsx` 跑 `apps/server/src/index.ts`。
 
 ## 总览
 
@@ -156,7 +156,9 @@ Gemini Live 自己保存这一场的多轮上下文。断开后这场上下文�
 1. `checkTaskReminders`：到期且 `reminderSent = false` 的待办改为 `queued`。`speaking` 超过 45 秒退回 `queued`。
 2. `checkAside`：语音会话数大于 0 时不留。否则 `decideAside` 从放不下的事、未问完的问题、约定、临近日子、到期待办里选一句，写入 `companion_asides`。
 
-浏览器每 5 秒 `GET /api/tasks/reminders?voice=0|1`。人在语音里且 `mentionDue` 成功，则 `delivery` 为 `speak`，再 `POST /api/tasks/reminders/settle`。人不在，则服务端把句子留给留言。每 15 秒 `GET /api/companion/aside` 刷新「她留下的」。
+浏览器每 5 秒 `GET /api/tasks/reminders?voice=0|1`。人在语音里则可能 `delivery: speak`（领取时返回 `claimedAt`），客户端 `mentionDue` 后 `POST /api/tasks/reminders/settle`（须带回 `claimedAt`）。人不在则服务端 `leave`。未听完 Aside 在有效期内会挡住 reminder leave（`shouldProtectUnheardAside`），settle `heard=false` 时可能 `deferred` 退回 `queued`。每 15 秒 `GET /api/companion/aside` 刷新「她留下的」。
+
+**租约（未提交工作区）：** claim/settle 共享逻辑在 `apps/server/src/companion/reminderLease.ts`。`queued→speaking` 为 CAS；settle 的 finish / deferred→queued 均为条件 UPDATE（`speaking` + `updated_at = claimedAt`）。`speaking` 时缺 `claimedAt` → 409 stale。不保证 exactly-once 播报。
 
 另外，Gemini Live 配置了 `proactivity.proactiveAudio: true`。隔了至少三小时再连上时，`buildReunionOpening` 的 cue 经 `cueReunion` 发给模型，让她先开口。这不是后台推送。页面关掉、进程不在，没有推送通道。`Notification` 只在权限已经是 `granted` 时弹出，代码里没有 `requestPermission`。
 
@@ -194,7 +196,26 @@ Gemini Live 自己保存这一场的多轮上下文。断开后这场上下文�
 - 无账号与鉴权；`cors()` 默认放开。能打到 3000 端口即可读记忆、改名、取 Gemini token。
 - 天气 / 搜索 / 待办在浏览器里写死 `http://localhost:3000`，与经 Vite 代理的相对 `/api` 并存。
 - 会话原文只在浏览器 `localStorage`，不进 SQLite。
-- Live 代理缓冲满 32 条时丢弃客户端消息且不回错；`voiceSessions` 只计本进程。
+- Live 代理缓冲满时的行为与 `voiceSessions` 定义见未提交工作区（阶段 1）；**仍只计本进程**。
 - 以上条目在对照 HEAD `3e9dd05` 的源码结构时仍可见；**未在本次文档修订中重新跑安全或负载验证**。
+
+### 未提交工作区：阶段 1–6（2026-10-16 收尾核对）
+
+工作区相对 HEAD `3e9dd05` 有未提交改动（**未 git commit**）。阶段 6 审查通过并允许收尾；**未开始第 7 阶段**。
+
+| 阶段 | 要点（以工作区源码为准） |
+| --- | --- |
+| 1–2 | Live 代理抽到 `liveProxyBridge.ts`；`voiceSessions` = 上游就绪会话数；客户端 `liveSessionLifecycle` / `connectionGeneration`；音频故障隔离 `audioPlayback.ts` |
+| 3 | 连接错误提示 `connectionFeedback.ts` |
+| 4 | D2：`shouldProtectUnheardAside` 挡 reminder leave；settle 可 `deferred` |
+| 5 | 只读审查（无代码义务） |
+| 6 | 租约：`reminderLease.ts`；客户端 `reminderClient` / `dueWait` cleanup 取消等待；Aside deferred 客户端 45s 退避（挡 `mentionDue`，不挡 GET claim） |
+
+**非阻塞（P2，不阻塞第 6 阶段收尾）：**
+
+- P2-1：`PATCH /api/tasks/:id/complete` 会刷新 `updatedAt`，若任务正 `speaking`，合法 `claimedAt` 可能变 stale。
+- P2-2：Aside deferred 后客户端约 45s 内不 `mentionDue`，但 GET 仍可能每 ~5s claim→settle→deferred。
+
+**明确未验证（不得写成已通过）：** 真实浏览器双标签；真实 Gemini Live；响应丢失端到端；用户在播报期间点击完成；多进程并行 settle。
 
 工具声明在 `sessionFunctionDeclarations`（`RealtimeClient.ts`）：`hold_view`、`rename_companion`、`remember_memory`、`forget_memory`、`recall_memory`、`get_weather`、`web_search`、`create_task`、`list_tasks`、`complete_task`、`delete_task`。模型发出 function call 后，由 `RealtimeClient` 再请求上面的 HTTP。
