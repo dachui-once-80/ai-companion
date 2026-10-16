@@ -3093,7 +3093,7 @@ export class RealtimeClient {
 
     if (!line) return;
 
-    let played = false;
+    let played: boolean;
 
     try {
       played = await this.playAudio(line.pcm, generation, {
