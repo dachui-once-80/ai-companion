@@ -16,6 +16,7 @@ const scripts = [
   "src/scripts/between.check.ts",
   "src/scripts/live-precondition.check.ts",
   "src/scripts/offline-negative.check.ts",
+  "src/scripts/rename.check.ts",
 ];
 
 let failed = 0;

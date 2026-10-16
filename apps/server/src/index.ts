@@ -19,6 +19,7 @@ import {
 } from "./companion/aside";
 import { buildReunionOpening } from "./companion/reunion";
 import { Companion } from "./companion/Companion";
+import { registerCompanionIdentityRoutes } from "./companion/identityRoutes";
 import { holdSessionView } from "./companion/sessionView";
 import {
   isThoughtKind,
@@ -132,45 +133,6 @@ const memoryManager = new MemoryManager(
   memoryStore,
   thoughtStore,
   createGeminiMeaning(geminiApiKey, gemini),
-);
-
-// app.get(
-//   "/api/memory/identity",
-//   (_req, res) => {
-//     res.json(
-//       memoryStore.getIdentity(),
-//     );
-//   },
-// );
-
-app.post(
-  "/api/memory/identity/name",
-  (req, res) => {
-    const { name } =
-      req.body as {
-        name?: unknown;
-      };
-
-    if (
-      typeof name !== "string" ||
-      name.trim().length === 0
-    ) {
-      res.status(400).json({
-        error:
-          "name is required",
-      });
-
-      return;
-    }
-
-    // memoryStore.rename(
-    //   name.trim(),
-    // );
-
-    // res.json(
-    //   memoryStore.getIdentity(),
-    // );
-  },
 );
 
 app.get(
@@ -1108,47 +1070,7 @@ server.listen(PORT, () => {
   );
 });
 
-app.get(
-  "/api/companion/identity",
-  (_req, res) => {
-    res.json(
-      companion.getIdentity(),
-    );
-  },
-);
-
-app.post(
-  "/api/companion/rename",
-  (req, res) => {
-    const { name } =
-      req.body as {
-        name?: unknown;
-      };
-
-    if (typeof name !== "string") {
-      res.status(400).json({
-        error: "name must be a string",
-      });
-
-      return;
-    }
-
-    try {
-      companion.rename(name);
-
-      res.json(
-        companion.getIdentity(),
-      );
-    } catch (error) {
-      res.status(400).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      });
-    }
-  },
-);
+registerCompanionIdentityRoutes(app, companion);
 
 app.get("/api/companion/thoughts", (req, res) => {
   const rawKind = req.query.kind;

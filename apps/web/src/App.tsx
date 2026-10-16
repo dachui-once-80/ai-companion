@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import MemoryPanel from "./memory/MemoryPanel";
 import { formatDate } from "./formatDate";
+import { createIdentityGate } from "./identityLoad";
 import {
   parseCompanionAffect,
   RealtimeClient,
@@ -38,6 +39,19 @@ function readScreen(): Screen {
   return "meet";
 }
 
+function readCurrentName(data: unknown): string | null {
+  if (
+    data &&
+    typeof data === "object" &&
+    "currentName" in data &&
+    typeof data.currentName === "string"
+  ) {
+    return data.currentName;
+  }
+
+  return null;
+}
+
 function cachedName(): string {
   try {
     return sessionStorage.getItem(NAME_KEY)?.trim() ?? "";
@@ -71,6 +85,8 @@ function App() {
   const [presence, setPresence] = useState<Floor>("together");
   const [emotion, setEmotion] = useState<CompanionEmotion>("calm");
   const affectEpoch = useRef(0);
+  const [identityGate] = useState(createIdentityGate);
+  const identityMounted = useRef(true);
   const [visualState, setVisualState] = useState<VisualState>("idle");
   const [notice, setNotice] = useState("");
   const voiceOpenRef = useRef(false);
@@ -98,25 +114,22 @@ function App() {
   }, []);
 
   const loadIdentity = useCallback(async () => {
+    const seq = identityGate.begin();
+
     try {
       const response = await fetch("/api/companion/identity");
 
       if (!response.ok) return;
 
-      const data: unknown = await response.json();
+      const name = readCurrentName(await response.json());
 
-      if (
-        data &&
-        typeof data === "object" &&
-        "currentName" in data &&
-        typeof data.currentName === "string"
-      ) {
-        applyName(data.currentName);
-      }
+      if (!identityGate.shouldApply(seq, !identityMounted.current) || !name) return;
+
+      applyName(name);
     } catch (error) {
       console.warn("[Identity] load failed:", error);
     }
-  }, [applyName]);
+  }, [applyName, identityGate]);
 
   const publishLive = useCallback((draft: TalkDraft) => {
     setLiveLines(draft.lines.slice(-8));
@@ -218,8 +231,39 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void loadIdentity();
-  }, [loadIdentity, screen]);
+    let dropped = false;
+    const seq = identityGate.begin();
+
+    fetch("/api/companion/identity")
+      .then((response) => {
+        if (!response.ok) return null;
+
+        return response.json() as Promise<unknown>;
+      })
+      .then((data) => {
+        if (!identityGate.shouldApply(seq, dropped || !identityMounted.current) || data == null) return;
+
+        const name = readCurrentName(data);
+
+        if (name) applyName(name);
+      })
+      .catch((error: unknown) => {
+        if (!dropped) console.warn("[Identity] load failed:", error);
+      });
+
+    return () => {
+      dropped = true;
+    };
+  }, [applyName, identityGate, screen]);
+
+  useEffect(() => {
+    identityMounted.current = true;
+
+    return () => {
+      identityMounted.current = false;
+      identityGate.invalidate();
+    };
+  }, [identityGate]);
 
   useEffect(() => {
     const onVisible = () => {
@@ -528,6 +572,8 @@ function App() {
         }
 
         if (message.type === "renamed") {
+          // 改名是本地权威结果：作废进行中的身份请求，避免旧响应盖回旧名。
+          identityGate.invalidate();
           applyName(message.name);
         }
 

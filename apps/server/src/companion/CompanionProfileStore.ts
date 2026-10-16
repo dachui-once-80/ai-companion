@@ -5,6 +5,13 @@ import { DEFAULT_COMPANION_NAME } from "./Identity";
 
 const PROFILE_ID = "main";
 
+export class InvalidNameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidNameError";
+  }
+}
+
 export class CompanionProfileStore {
   getOrCreate() {
     const existing = db
@@ -39,11 +46,11 @@ export class CompanionProfileStore {
     const name = newName.trim();
 
     if (!name) {
-      throw new Error("Name cannot be empty");
+      throw new InvalidNameError("Name cannot be empty");
     }
 
     if (name.length > 30) {
-      throw new Error("Name cannot exceed 30 characters");
+      throw new InvalidNameError("Name cannot exceed 30 characters");
     }
 
     const current = this.getOrCreate();
