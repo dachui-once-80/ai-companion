@@ -20,6 +20,9 @@ const scripts = [
   "src/scripts/live-proxy.check.ts",
   "src/scripts/reminder-leave.check.ts",
   "src/scripts/reminder-claim.check.ts",
+  "src/scripts/access-token.check.ts",
+  "src/scripts/access-auth-routes.check.ts",
+  "src/scripts/access-upgrade.check.ts",
 ];
 
 let failed = 0;

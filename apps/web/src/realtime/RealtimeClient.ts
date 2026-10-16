@@ -2753,7 +2753,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            `http://localhost:3000/api/weather?city=${encodeURIComponent(city)}`,
+            `/api/weather?city=${encodeURIComponent(city)}`,
           );
 
           const data = await this.readJson(response);
@@ -2798,7 +2798,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            `http://localhost:3000/api/search?q=${encodeURIComponent(query)}`,
+            `/api/search?q=${encodeURIComponent(query)}`,
           );
 
           const data = await this.readJson(response);
@@ -2850,7 +2850,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            "http://localhost:3000/api/tasks",
+            "/api/tasks",
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -2893,7 +2893,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            `http://localhost:3000/api/tasks?status=${encodeURIComponent(status)}`,
+            `/api/tasks?status=${encodeURIComponent(status)}`,
           );
 
           const data = await this.readJson(response);
@@ -2925,7 +2925,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            `http://localhost:3000/api/tasks/${encodeURIComponent(taskId)}/complete`,
+            `/api/tasks/${encodeURIComponent(taskId)}/complete`,
             { method: "PATCH" },
           );
 
@@ -2958,7 +2958,7 @@ export class RealtimeClient {
           }
 
           const response = await fetch(
-            `http://localhost:3000/api/tasks/${encodeURIComponent(taskId)}`,
+            `/api/tasks/${encodeURIComponent(taskId)}`,
             { method: "DELETE" },
           );
 

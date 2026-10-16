@@ -15,8 +15,11 @@
     "check:web:connection-feedback": "pnpm --filter web check:connection-feedback",
     "check:web:reminder-client": "pnpm --filter web check:reminder-client",
     "check:web:due-wait": "pnpm --filter web check:due-wait",
+    "check:web:vite-proxy-auth": "pnpm --filter web check:vite-proxy-auth",
+    "check:web:vite-dev-proxy-auth": "pnpm --filter web check:vite-dev-proxy-auth",
+    "check:web:companion-token-leak": "pnpm --filter web check:companion-token-leak",
     "check:server:reminder-claim": "pnpm --filter server exec tsx src/scripts/reminder-claim.check.ts",
-    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
+    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:web:vite-proxy-auth && pnpm check:web:vite-dev-proxy-auth && pnpm check:web:companion-token-leak && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {

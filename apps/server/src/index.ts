@@ -48,16 +48,23 @@ import {
   setGlobalDispatcher,
 } from "undici";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocketServer } from "ws";
 import type {
   MemoryCategory,
   MemoryImportance,
 } from "./memory/MemoryTypes";
 import {
-  bindLiveProxyPair,
-  closeSocketQuietly,
   createVoiceSessionCounter,
 } from "./gemini/liveProxyBridge";
+import {
+  attachLiveProxyUpgrade,
+  GEMINI_WS_ORIGIN,
+  LIVE_PROXY_PREFIX,
+} from "./gemini/liveProxyUpgrade";
+import {
+  createCompanionAccessMiddleware,
+  readCompanionAccessTokenFromEnv,
+} from "./auth/accessToken";
 
 /**
  * =========================================================
@@ -92,10 +99,6 @@ const liveProxyAgent = proxyUrl
   ? new HttpsProxyAgent(proxyUrl)
   : undefined;
 
-/** 浏览器经此前缀转发 Live WebSocket，由服务端走代理连 Gemini */
-const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
-const GEMINI_WS_ORIGIN = "wss://generativelanguage.googleapis.com";
-
 /**
  * =========================================================
  * App
@@ -104,11 +107,19 @@ const GEMINI_WS_ORIGIN = "wss://generativelanguage.googleapis.com";
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+  }),
+);
 
 app.use(express.json());
 
+const companionAccessToken = readCompanionAccessTokenFromEnv();
+app.use(createCompanionAccessMiddleware(companionAccessToken));
+
 const PORT = 3000;
+const LISTEN_HOST = "127.0.0.1";
 const companion = new Companion();
 
 
@@ -953,41 +964,24 @@ const server = http.createServer(app);
 
 const liveProxyWss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (request, socket, head) => {
-  const requestUrl = request.url ?? "";
-
-  if (!requestUrl.startsWith(`${LIVE_PROXY_PREFIX}/`)) {
-    socket.destroy();
-    return;
-  }
-
-  const upstreamPath = requestUrl.slice(LIVE_PROXY_PREFIX.length);
-  const upstreamUrl = `${GEMINI_WS_ORIGIN}${upstreamPath}`;
-
-  liveProxyWss.handleUpgrade(request, socket, head, (client) => {
-    const upstream = new WebSocket(upstreamUrl, {
-      agent: liveProxyAgent,
-    });
-
-    bindLiveProxyPair({
-      client,
-      upstream,
-      voice: voiceSessions,
-      closeQuietly: closeSocketQuietly,
-      onUpstreamOpen: () => {
-        console.log("[Gemini Live Proxy] upstream connected");
-      },
-      onClosed: (reason) => {
-        if (!reason) return;
-        console.warn("[Gemini Live Proxy] pair closed:", reason.slice(0, 120));
-      },
-    });
-  });
+attachLiveProxyUpgrade({
+  server,
+  wss: liveProxyWss,
+  accessToken: companionAccessToken,
+  voice: voiceSessions,
+  agent: liveProxyAgent,
+  onUpstreamOpen: () => {
+    console.log("[Gemini Live Proxy] upstream connected");
+  },
+  onClosed: (reason) => {
+    if (!reason) return;
+    console.warn("[Gemini Live Proxy] pair closed:", reason.slice(0, 120));
+  },
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, LISTEN_HOST, () => {
   console.log(
-    `AI Companion server running at http://localhost:${PORT}`,
+    `AI Companion server running at http://${LISTEN_HOST}:${PORT}`,
   );
 
   console.log(

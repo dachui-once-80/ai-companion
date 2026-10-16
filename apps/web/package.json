@@ -13,6 +13,9 @@
     "check:connection-feedback": "tsx scripts/connection-feedback.check.ts",
     "check:reminder-client": "tsx scripts/reminder-client.check.ts",
     "check:due-wait": "tsx scripts/due-wait.check.ts",
+    "check:vite-proxy-auth": "tsx scripts/vite-proxy-auth.check.ts",
+    "check:vite-dev-proxy-auth": "tsx scripts/vite-dev-proxy-auth.check.ts",
+    "check:companion-token-leak": "tsx scripts/companion-token-leak.check.ts",
     "preview": "vite preview"
   },
   "dependencies": {
