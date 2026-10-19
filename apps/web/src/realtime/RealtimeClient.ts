@@ -27,6 +27,15 @@ import {
   resolveStartFailure,
 } from "./audioPlayback";
 import { cancelDueWaitSlots, finishDueWaitSlots } from "./dueWait";
+import {
+  applyTranscriptFragment,
+  callsNeedFactGrounding,
+  createTranscriptStream,
+  noteForDiscardedPreToolSpeech,
+  noteForFactQueryFailure,
+  resetTranscriptStream,
+  type TranscriptStream,
+} from "./turnTranscript";
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -54,6 +63,8 @@ export type RealtimeMessage =
   | { type: "input_transcript"; text: string; speaker: string }
   | { type: "presence"; floor: Floor }
   | { type: "output_transcript"; text: string }
+  /** 撤回本轮 companion 已展示的一段（工具前未经核实的回答作废） */
+  | { type: "output_retract"; text: string }
   | { type: "turn_complete" }
   | { type: "memory_updated" }
   | { type: "renamed"; name: string }
@@ -132,6 +143,7 @@ const SLOW_TOOLS = new Set([
   "get_weather",
   "web_search",
   "recall_memory",
+  "list_tasks",
 ]);
 
 function weatherPlaceName(raw: string): string {
@@ -217,6 +229,7 @@ function leadInTool(
 
   if (names.has("get_weather")) return "get_weather";
   if (names.has("web_search")) return "web_search";
+  if (names.has("list_tasks")) return "list_tasks";
 
   return "recall_memory";
 }
@@ -888,6 +901,15 @@ export class RealtimeClient {
   // 播放代次：断开或打断后，旧音频回调自动失效。
   private playbackGeneration = 0;
 
+  // 串行处理服务端消息，避免 tool / 音频 await 期间并发改同一轮状态。
+  private serverMessageTail: Promise<void> = Promise.resolve();
+
+  // 本轮输入/输出转写流：去重重复事件，并把累积快照收成增量。
+  private inputTranscriptStream: TranscriptStream = createTranscriptStream();
+  private outputTranscriptStream: TranscriptStream = createTranscriptStream();
+  // 自用户开口以来 companion 经转写发出的文本（供工具前作废回退；不因 turnComplete 清空）。
+  private companionSpeechSinceUserOpen = "";
+
   private connecting = false;
   private disposed = false;
   private cleanupPromise: Promise<void> | null = null;
@@ -1226,19 +1248,20 @@ export class RealtimeClient {
           onmessage: (message: LiveServerMessage) => {
             if (!this.isCurrentConnection(generation)) return;
 
-            void this.handleServerMessage(
-              message,
-              generation,
-            ).catch((error: unknown) => {
-              if (!this.isCurrentConnection(generation)) return;
+            // 必须串行：handleServerMessage 会 await 工具与播放，
+            // 并发会让同一轮转写/turnComplete/tool 交错，造成重复或前后矛盾。
+            this.serverMessageTail = this.serverMessageTail
+              .then(() => this.handleServerMessage(message, generation))
+              .catch((error: unknown) => {
+                if (!this.isCurrentConnection(generation)) return;
 
-              console.error(
-                "[Gemini] Message processing failed:",
-                error,
-              );
+                console.error(
+                  "[Gemini] Message processing failed:",
+                  error,
+                );
 
-              this.emit({ type: "error", error });
-            });
+                this.emit({ type: "error", error });
+              });
           },
 
           onerror: (error: ErrorEvent) => {
@@ -1707,7 +1730,7 @@ export class RealtimeClient {
 
       this.lastRelevant = text;
       this.injectBetween(
-        `（内部状态，不是用户说的话，不要复述，也不要因此开口。下面几条和对方刚刚说的是同一件事或同一个人。这一句只接这几条。没有列出的旧事不要一起讲，也不要用别的记忆顶上。对不上就当不记得。）\n${text}`,
+        `（内部状态，不是用户说的话，不要复述，也不要因此开口。下面几条和对方刚刚说的是同一件事或同一个人，只供参考。涉及事实、待办、偏好是否仍成立时，先用对应工具查实再开口；未查之前不要把这些当成已经核实的答案说出口。没有列出的旧事不要一起讲，也不要用别的记忆顶上。对不上就当不记得。）\n${text}`,
       );
     } catch (error) {
       console.warn("[Memory] relevant recall failed:", error);
@@ -2167,7 +2190,15 @@ export class RealtimeClient {
     const toolCall = message.toolCall;
 
     if (toolCall) {
-      await this.handleToolCall(toolCall, generation);
+      // 工具里的 fetch / aside 可能数秒；不得 await 在串行队列上，
+      // 否则 interrupted、用户 barge-in 转写会被堵住。
+      // discard / toolsInFlight++ 在 handleToolCall 开头同步完成。
+      void this.handleToolCall(toolCall, generation).catch((error: unknown) => {
+        if (!this.isCurrentConnection(generation)) return;
+
+        console.error("[Gemini] Tool handling failed:", error);
+        this.emit({ type: "error", error });
+      });
       return;
     }
 
@@ -2204,37 +2235,44 @@ export class RealtimeClient {
       inputTranscript.length > 0
     ) {
       this.openUserTurn();
-      this.currentUserText += inputTranscript;
-      const speaker = this.resolveSpeaker(
-        content.inputTranscription?.speakerLabel,
+      const inputDelta = applyTranscriptFragment(
+        this.inputTranscriptStream,
         inputTranscript,
-        true,
-      );
-      const decision = this.commitPresence(
-        this.currentUserText,
-        speaker,
-        generation,
       );
 
-      if (this.appraiseThisLine) {
-        this.scheduleUserAppraisal(generation);
-      } else if (this.userAppraisalTimer !== null) {
-        window.clearTimeout(this.userAppraisalTimer);
-        this.userAppraisalTimer = null;
+      if (inputDelta) {
+        this.currentUserText += inputDelta;
+        const speaker = this.resolveSpeaker(
+          content.inputTranscription?.speakerLabel,
+          inputDelta,
+          true,
+        );
+        const decision = this.commitPresence(
+          this.currentUserText,
+          speaker,
+          generation,
+        );
+
+        if (this.appraiseThisLine) {
+          this.scheduleUserAppraisal(generation);
+        } else if (this.userAppraisalTimer !== null) {
+          window.clearTimeout(this.userAppraisalTimer);
+          this.userAppraisalTimer = null;
+        }
+
+        this.emit({
+          type: "input_transcript",
+          text: inputDelta,
+          speaker: transcriptSpeaker(decision, speaker),
+        });
+
+        if (this.lineForCompanion && !isBackchannel(this.currentUserText)) {
+          this.scheduleRelevant(generation);
+        }
+
+        // 她还在出声时用户已经开口，立刻停播。
+        this.bargeInFromUser(generation);
       }
-
-      this.emit({
-        type: "input_transcript",
-        text: inputTranscript,
-        speaker: transcriptSpeaker(decision, speaker),
-      });
-
-      if (this.lineForCompanion && !isBackchannel(this.currentUserText)) {
-        this.scheduleRelevant(generation);
-      }
-
-      // 她还在出声时用户已经开口，立刻停播。
-      this.bargeInFromUser(generation);
     }
 
     if (content.interrupted) {
@@ -2249,21 +2287,29 @@ export class RealtimeClient {
       typeof outputTranscript === "string" &&
       outputTranscript.length > 0
     ) {
-      if (this.withholdSpeech && !this.dueRelease) {
-        this.withheldText += outputTranscript;
-      } else {
-        this.markCompanionSpoke();
-        this.noteDueOutput(outputTranscript);
-        this.currentCompanionText += outputTranscript;
+      const outputDelta = applyTranscriptFragment(
+        this.outputTranscriptStream,
+        outputTranscript,
+      );
 
-        if (this.awaitingCompanionText) {
-          this.armCompanionCapture(generation);
+      if (outputDelta) {
+        if (this.withholdSpeech && !this.dueRelease) {
+          this.withheldText += outputDelta;
+        } else {
+          this.markCompanionSpoke();
+          this.noteDueOutput(outputDelta);
+          this.currentCompanionText += outputDelta;
+          this.companionSpeechSinceUserOpen += outputDelta;
+
+          if (this.awaitingCompanionText) {
+            this.armCompanionCapture(generation);
+          }
+
+          this.emit({
+            type: "output_transcript",
+            text: outputDelta,
+          });
         }
-
-        this.emit({
-          type: "output_transcript",
-          text: outputTranscript,
-        });
       }
     }
 
@@ -2321,6 +2367,14 @@ export class RealtimeClient {
 
     const userText = this.currentUserText.trim();
     this.currentUserText = "";
+    resetTranscriptStream(this.inputTranscriptStream);
+
+    // 工具还在飞时可能还会有结果回答，保留输出流与可撤回文本。
+    // 回合已完整结束时清空，避免迟到的 toolCall 误撤已经说完的下一句。
+    if (this.toolsInFlight === 0) {
+      resetTranscriptStream(this.outputTranscriptStream);
+      this.companionSpeechSinceUserOpen = "";
+    }
 
     if (this.appraiseThisLine && userText.length >= 2) {
       void this.appraiseTurn(userText, generation);
@@ -2434,6 +2488,11 @@ export class RealtimeClient {
 
       return;
     }
+
+    const discardedPreToolSpeech = this.discardUngroundedCompanionSpeech(
+      generation,
+      functionCalls,
+    );
 
     const needsAside = functionCalls.some((call) =>
       SLOW_TOOLS.has(call.name ?? ""),
@@ -2730,7 +2789,11 @@ export class RealtimeClient {
                       ? "没有对得上的记忆。直接说不记得，不要用别的旧事代替。"
                       : "只用和问题对得上的这几条。不要把没返回的旧事一起讲。",
                 }
-              : { success: false, error: "读取记忆失败" },
+              : {
+                  success: false,
+                  error: "读取记忆失败",
+                  note: noteForFactQueryFailure(),
+                },
           });
 
           continue;
@@ -2765,6 +2828,7 @@ export class RealtimeClient {
               response: {
                 success: false,
                 error: "天气查询失败，请稍后再试",
+                note: noteForFactQueryFailure(),
               },
             });
             continue;
@@ -2812,6 +2876,7 @@ export class RealtimeClient {
               response: {
                 success: false,
                 error: "联网搜索暂时不可用，请稍后重试",
+                note: noteForFactQueryFailure(),
               },
             });
             continue;
@@ -2887,6 +2952,7 @@ export class RealtimeClient {
               response: {
                 success: false,
                 error: "无效的待办查询范围",
+                note: noteForFactQueryFailure(),
               },
             });
             continue;
@@ -2902,8 +2968,17 @@ export class RealtimeClient {
             name,
             id: call.id,
             response: response.ok
-              ? { success: true, result: data }
-              : { success: false, error: "查询待办失败" },
+              ? {
+                  success: true,
+                  result: data,
+                  note:
+                    "只根据本次返回的待办作答。清单为空就说目前没有待办；这和查询失败不同，不要说成查不到。没有返回的不要编。",
+                }
+              : {
+                  success: false,
+                  error: "查询待办失败",
+                  note: noteForFactQueryFailure(),
+                },
           });
 
           continue;
@@ -2992,6 +3067,9 @@ export class RealtimeClient {
           response: {
             success: false,
             error: "工具请求失败",
+            ...(callsNeedFactGrounding([{ name }])
+              ? { note: noteForFactQueryFailure() }
+              : {}),
           },
         });
       }
@@ -3009,6 +3087,22 @@ export class RealtimeClient {
             lead_in_spoken: true,
           };
         }
+      }
+    }
+
+    if (discardedPreToolSpeech) {
+      const discardNote = noteForDiscardedPreToolSpeech();
+
+      for (const item of responses) {
+        if (!callsNeedFactGrounding([item])) continue;
+
+        const prior =
+          typeof item.response.note === "string" ? item.response.note : "";
+
+        item.response = {
+          ...item.response,
+          note: prior ? `${discardNote}${prior}` : discardNote,
+        };
       }
     }
 
@@ -3043,10 +3137,81 @@ export class RealtimeClient {
     this.asidePlays = 0;
     this.suppressAsideFollowUp = false;
     this.resultAudioQueued = false;
+    resetTranscriptStream(this.inputTranscriptStream);
+    resetTranscriptStream(this.outputTranscriptStream);
+    this.companionSpeechSinceUserOpen = "";
     this.lineForCompanion =
       this.floor === "together" || this.floor === "joined";
     this.appraiseThisLine = this.floor === "together";
     this.withholdSpeech = this.floor === "aside" || this.floor === "holding";
+  }
+
+  /**
+   * 停掉查询前已经播出的回答，但不封锁后续工具结果音频。
+   * clearPlayback(discardRest=true) 会把 discardUnplayedAudio 卡住，
+   * 导致工具返回后的新音频也被丢掉。
+   */
+  private voidCompanionSpeechForTools(generation: number): void {
+    if (!this.isCurrentConnection(generation)) return;
+
+    this.cancelAsideTimer();
+    this.asideSources.clear();
+    this.playbackGeneration++;
+    this.nextOutputTime = 0;
+    this.speakingNotified = false;
+    this.discardUnplayedAudio = false;
+    this.playbackTurnSettled = false;
+    this.suppressAsideFollowUp = false;
+    this.resultAudioQueued = false;
+
+    for (const source of this.activeAudioSources) {
+      source.onended = null;
+
+      try {
+        source.stop();
+      } catch {
+        // 可能已经结束。
+      }
+
+      try {
+        source.disconnect();
+      } catch {
+        // 节点可能已经断开。
+      }
+    }
+
+    this.activeAudioSources.clear();
+    this.emit({ type: "playback_interrupted" });
+  }
+
+  private discardUngroundedCompanionSpeech(
+    generation: number,
+    functionCalls: ReadonlyArray<{ name?: string }>,
+  ): boolean {
+    if (!callsNeedFactGrounding(functionCalls)) return false;
+
+    const spoken = this.companionSpeechSinceUserOpen;
+
+    if (!spoken) return false;
+
+    console.log("[Turn] 查询前回答作废，改以工具结果为准");
+
+    this.voidCompanionSpeechForTools(generation);
+
+    if (this.currentCompanionText.endsWith(spoken)) {
+      this.currentCompanionText = this.currentCompanionText.slice(
+        0,
+        -spoken.length,
+      );
+    }
+
+    this.emit({ type: "output_retract", text: spoken });
+    resetTranscriptStream(this.outputTranscriptStream);
+    this.companionSpeechSinceUserOpen = "";
+    this.spokeThisTurn = false;
+    this.asidePlays = 0;
+
+    return true;
   }
 
   private markCompanionSpoke(): void {
@@ -3743,8 +3908,12 @@ export class RealtimeClient {
     this.reunionCued = false;
     this.leftNote = null;
     this.playbackTail = Promise.resolve();
+    this.serverMessageTail = Promise.resolve();
     this.asideSources.clear();
     this.currentUserText = "";
+    resetTranscriptStream(this.inputTranscriptStream);
+    resetTranscriptStream(this.outputTranscriptStream);
+    this.companionSpeechSinceUserOpen = "";
     this.lastAppraisedUserText = "";
     this.heldViews = [];
     this.pinnedViews = [];

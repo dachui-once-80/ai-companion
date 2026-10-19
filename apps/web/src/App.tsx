@@ -36,6 +36,7 @@ import {
   type TalkDraft,
   type TalkLine,
 } from "./talk/lastTalk";
+import { retractCompanionSuffix } from "./realtime/turnTranscript";
 
 import "./App.css";
 
@@ -179,6 +180,30 @@ function App() {
             ];
 
       draft.lines = next;
+      saveDraft(draft);
+      publishLive(draft);
+    },
+    [publishLive],
+  );
+
+  const retractCompanionLine = useCallback(
+    (suffix: string) => {
+      const draft = draftRef.current;
+
+      // 空后缀、无草稿、后缀对不上最后一条 companion 行：一律不改。
+      if (!draft || !suffix) return;
+
+      const next = retractCompanionSuffix(draft.lines, suffix);
+
+      if (next === draft.lines) return;
+
+      draft.lines = next;
+
+      // 已播出的音频无法收回；此处只撤回字幕。若 unfinished 正是被撤段落则清掉。
+      if (draft.unfinished && !next.some((line) => line.text === draft.unfinished)) {
+        draft.unfinished = "";
+      }
+
       saveDraft(draft);
       publishLive(draft);
     },
@@ -891,6 +916,10 @@ function App() {
             : message.speaker;
 
           appendLine(speaker, message.text, fromCompanion);
+        }
+
+        if (message.type === "output_retract") {
+          retractCompanionLine(message.text);
         }
 
         if (message.type === "connected") {
