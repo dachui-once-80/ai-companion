@@ -4,6 +4,10 @@
   "scripts": {
     "dev:web": "pnpm --filter web dev",
     "dev:server": "pnpm --filter server dev",
+    "dev:server:local": "node scripts/dev-with-token.mjs server",
+    "dev:web:local": "node scripts/dev-with-token.mjs web",
+    "dev:local": "node scripts/dev-with-token.mjs all",
+    "check:dev-with-token": "node scripts/dev-with-token.check.mjs",
     "check:web:type": "pnpm --filter web exec tsc -b --pretty false",
     "check:web:lint": "pnpm --filter web lint",
     "check:web:build": "pnpm --filter web build",

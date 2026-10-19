@@ -9,3 +9,5 @@ dist/
 /apps/server/companion.db-wal
 /apps/server/companion.db-shm
 /apps/server/companion.db-journal
+
+.local/
