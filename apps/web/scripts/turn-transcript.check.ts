@@ -5,6 +5,7 @@ import {
   createTranscriptStream,
   noteForDiscardedPreToolSpeech,
   noteForFactQueryFailure,
+  noteForRecallSuccess,
   resetTranscriptStream,
   retractCompanionSuffix,
 } from "../src/realtime/turnTranscript.ts";
@@ -102,6 +103,30 @@ assert.equal(
   assert.match(note, /查询失败/);
   assert.match(note, /不要说成没有/);
   assert.doesNotMatch(note, /没有记录。$/);
+}
+
+// --- recall_memory 成功 note：空 / 仅 current / 含 historical ---
+{
+  const empty = noteForRecallSuccess([]);
+  assert.match(empty, /没有对得上的记忆/);
+  assert.doesNotMatch(empty, /历史记录/);
+
+  const currentOnly = noteForRecallSuccess([
+    { status: "current" },
+    { status: "current" },
+  ]);
+  assert.match(currentOnly, /只用和问题对得上的这几条/);
+  assert.doesNotMatch(currentOnly, /历史记录/);
+  assert.doesNotMatch(currentOnly, /不得据此覆盖/);
+
+  const mixed = noteForRecallSuccess([
+    { status: "current" },
+    { status: "historical" },
+  ]);
+  assert.match(mixed, /只用和问题对得上的这几条/);
+  assert.match(mixed, /历史记录/);
+  assert.match(mixed, /不代表当前事实/);
+  assert.match(mixed, /不得据此覆盖用户当前说法/);
 }
 
 {

@@ -81,6 +81,33 @@ export function noteForFactQueryFailure(): string {
   return "查询失败。如实告诉用户现在查不到，不要说成没有记录、没有待办或没有这件事。";
 }
 
+const RECALL_SUCCESS_BASE =
+  "只用和问题对得上的这几条。不要把没返回的旧事一起讲。";
+
+const RECALL_EMPTY =
+  "没有对得上的记忆。直接说不记得，不要用别的旧事代替。";
+
+const RECALL_HISTORICAL_CAUTION =
+  "其中标成「以前的」的条目是历史记录，不代表当前事实；如果涉及用户已纠正的旧值，不得据此覆盖用户当前说法。";
+
+/**
+ * recall_memory 成功时的内部说明。
+ * 空结果与仅 current 保持原语义；结果含 historical 时追加时态约束。
+ */
+export function noteForRecallSuccess(
+  memories: ReadonlyArray<{ status?: string }>,
+): string {
+  if (memories.length === 0) return RECALL_EMPTY;
+
+  const hasHistorical = memories.some(
+    (item) => item.status === "historical",
+  );
+
+  if (!hasHistorical) return RECALL_SUCCESS_BASE;
+
+  return `${RECALL_SUCCESS_BASE}${RECALL_HISTORICAL_CAUTION}`;
+}
+
 /** 工具结果返回后、且本轮查询前已说过话时的内部说明 */
 export function noteForDiscardedPreToolSpeech(): string {
   return "你刚才在查询完成前说的那句已经作废，用户那边撤掉了。只根据本次工具结果说一句。不要把作废的那句再重复，也不要改口叠两句。";

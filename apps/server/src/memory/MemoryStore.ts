@@ -334,7 +334,7 @@ export class MemoryStore {
   recall(options: RecallMemoryOptions): Memory[] {
     const query = options.query.trim();
     const key = options.key?.trim();
-    const scope = options.scope ?? "all";
+    const scope = options.scope ?? "current";
 
     let results = this.getAll();
 

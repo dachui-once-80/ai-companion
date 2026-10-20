@@ -11,6 +11,7 @@ const scripts = [
   "src/scripts/aside.check.ts",
   "src/scripts/profile.check.ts",
   "src/scripts/meaning.check.ts",
+  "src/scripts/memory-correction.check.ts",
   "src/scripts/prompt.check.ts",
   "src/scripts/persona.check.ts",
   "src/scripts/between.check.ts",

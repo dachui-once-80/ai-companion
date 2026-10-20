@@ -1556,7 +1556,7 @@ app.get("/api/memory/search", async (req, res) => {
 
   const scopeValue = req.query.scope
     ? String(req.query.scope).trim()
-    : "all";
+    : "current";
 
   if (!query && !key) {
     return res.status(400).json({

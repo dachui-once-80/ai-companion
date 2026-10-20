@@ -38,6 +38,10 @@ import {
     type RecallCandidate,
     type RecalledMemory,
 } from "./meaning";
+import {
+    DEFAULT_RECALL_SCOPE,
+    relevantScopeForUtterance,
+} from "./memoryScope";
 
 type ViewSource = {
     list(kind: "view"): Array<{ id: string; about: string; content: string }>;
@@ -87,7 +91,7 @@ export class MemoryManager {
     async recall(options: RecallMemoryOptions): Promise<RecalledMemory[]> {
         const query = options.query.trim();
         const key = options.key?.trim() || undefined;
-        const scope = options.scope ?? "all";
+        const scope = options.scope ?? DEFAULT_RECALL_SCOPE;
         const pool = this.collect(scope, key);
 
         if (!query) return pool.map(toRecalled);
@@ -99,14 +103,16 @@ export class MemoryManager {
 
     /**
      * 连线中这一句明显在说某个人或某件旧事时，补进那几条。
-     * 对不上就返回空，不把整段历史塞进来。
+     * 默认只取 current，避免纠正/撤销后的 historical 当现事实注入。
+     * 明确问过去时才纳入 historical，行首带「以前的」；对不上就空着。
      */
     async relevantText(utterance: string): Promise<string> {
         const topic = utterance.trim();
 
         if (topic.length < 2 || isTrivialUtterance(topic)) return "";
 
-        const pool = this.collect("all").filter((item) => !item.standing);
+        const scope = relevantScopeForUtterance(topic);
+        const pool = this.collect(scope).filter((item) => !item.standing);
         const picked = await this.pick(pool, topic, 4);
         const lines = new Map<string, string>();
 

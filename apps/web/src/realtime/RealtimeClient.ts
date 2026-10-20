@@ -33,6 +33,7 @@ import {
   createTranscriptStream,
   noteForDiscardedPreToolSpeech,
   noteForFactQueryFailure,
+  noteForRecallSuccess,
   resetTranscriptStream,
   type TranscriptStream,
 } from "./turnTranscript";
@@ -1730,7 +1731,7 @@ export class RealtimeClient {
 
       this.lastRelevant = text;
       this.injectBetween(
-        `（内部状态，不是用户说的话，不要复述，也不要因此开口。下面几条和对方刚刚说的是同一件事或同一个人，只供参考。涉及事实、待办、偏好是否仍成立时，先用对应工具查实再开口；未查之前不要把这些当成已经核实的答案说出口。没有列出的旧事不要一起讲，也不要用别的记忆顶上。对不上就当不记得。）\n${text}`,
+        `（内部状态，不是用户说的话，不要复述，也不要因此开口。下面几条和对方刚刚说的是同一件事或同一个人，只供参考。标成「以前的」的条目只是往事或已归档内容，不要说成现在仍然成立。涉及事实、待办、偏好是否仍成立时，先用对应工具查实再开口；未查之前不要把这些当成已经核实的答案说出口。没有列出的旧事不要一起讲，也不要用别的记忆顶上。对不上就当不记得。）\n${text}`,
       );
     } catch (error) {
       console.warn("[Memory] relevant recall failed:", error);
@@ -2784,10 +2785,9 @@ export class RealtimeClient {
               ? {
                   success: true,
                   memories,
-                  note:
-                    memories.length === 0
-                      ? "没有对得上的记忆。直接说不记得，不要用别的旧事代替。"
-                      : "只用和问题对得上的这几条。不要把没返回的旧事一起讲。",
+                  note: noteForRecallSuccess(
+                    memories as Array<{ status?: string }>,
+                  ),
                 }
               : {
                   success: false,
