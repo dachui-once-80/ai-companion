@@ -23,6 +23,7 @@ import {
   type ConnectionState,
   type CompanionEmotion,
 } from "./realtime/RealtimeClient";
+import { scheduleStartupConsolidationDrain } from "./realtime/startupConsolidationDrain";
 import type { Floor } from "./realtime/presence";
 import TalkPage from "./talk/TalkPage";
 import {
@@ -310,6 +311,10 @@ function App() {
       identityGate.invalidate();
     };
   }, [identityGate]);
+
+  useEffect(() => {
+    void scheduleStartupConsolidationDrain();
+  }, []);
 
   useEffect(() => {
     const onVisible = () => {

@@ -20,6 +20,7 @@ import {
   adoptOrReleaseLiveSession,
   releaseLiveSession,
 } from "./liveSessionLifecycle";
+import { runPostAdoptConnectEffects } from "./postAdoptConnectEffects";
 import {
   AudioSessionError,
   createChunkFaultWarner,
@@ -37,6 +38,39 @@ import {
   resetTranscriptStream,
   type TranscriptStream,
 } from "./turnTranscript";
+import { ConsolidationOutbox } from "./consolidationOutbox";
+import {
+  drainConsolidationOutbox,
+  type DrainConsolidationResult,
+  type DrainFetch,
+} from "./consolidationDrain";
+import {
+  chainConsolidationTail,
+  consolidationDrainInFlight,
+  currentConsolidationTail,
+  enqueueSerialDrain,
+} from "./consolidationDrainCoordinator";
+import {
+  CLEANUP_HANDOFF_WAIT_MS,
+  awaitHandoffTailWithTimeout,
+  flushDialogueThroughHandoff,
+  materializeFlushLedger,
+  mergePendingAfterFlush,
+  scheduleExclusiveTimeout,
+  type FlushBatchLedger,
+  type StickyHandoffBatch,
+} from "./consolidationFlushHandoff";
+
+/** 可选依赖注入；生产路径 `new RealtimeClient()` 行为不变。 */
+export type RealtimeClientOptions = {
+  consolidationOutbox?: ConsolidationOutbox;
+  /** 默认 `fetch`；测试注入 mock，禁止默认发真实 consolidate。 */
+  drainFetchImpl?: DrainFetch;
+  drainLeaseOwner?: string;
+  drainNow?: () => string;
+  /** 默认生产 flush。测试可注入一个会中断的实现，账本仍由客户端持有。 */
+  flushDialogue?: typeof flushDialogueThroughHandoff;
+};
 
 /** 与服务端 LIVE_PROXY_PREFIX 保持一致 */
 const LIVE_PROXY_PREFIX = "/api/gemini/live-proxy";
@@ -181,29 +215,6 @@ function localDateString(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-function dialogueWorthKeeping(batch: DialogueTurn[]): boolean {
-  const heard = batch.filter(
-    (turn) => turn.role === "user" || turn.role === "overheard",
-  );
-  const heardText = heard.map((turn) => turn.text).join("");
-
-  if (heardText.replace(/\s+/g, "").length < 4) return false;
-  if (heard.some((turn) => turn.role === "overheard")) return true;
-
-  return !heard.every((turn) => isShortLookup(turn.text));
-}
-
-function isShortLookup(text: string): boolean {
-  const compact = text.replace(/\s+/g, "");
-
-  if (compact.length < 2 || compact.length > 28) return false;
-  if (/我(叫|住|喜欢|决定|生日|在学|想记住)/.test(compact)) return false;
-
-  return /天气|气温|温度|下雨|降雨|刮风|风力|几度|冷不冷|热不热/.test(
-    compact,
-  );
-}
-
 function transcriptSpeaker(
   decision: PresenceDecision,
   speaker: HeardSpeaker,
@@ -212,15 +223,6 @@ function transcriptSpeaker(
   if (decision.lineRole === "overheard") return "你（对旁边）";
 
   return "你";
-}
-
-class ConsolidationDeferred extends Error {
-  readonly retryAfterMs: number;
-
-  constructor(retryAfterMs: number) {
-    super("consolidation deferred");
-    this.retryAfterMs = retryAfterMs;
-  }
 }
 
 function leadInTool(
@@ -233,50 +235,6 @@ function leadInTool(
   if (names.has("list_tasks")) return "list_tasks";
 
   return "recall_memory";
-}
-
-function readRetryAfter(data: unknown): number {
-  if (
-    typeof data !== "object" ||
-    data === null ||
-    !("retryAfterMs" in data)
-  ) {
-    return 0;
-  }
-
-  const value = data.retryAfterMs;
-
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
-
-  return Math.max(0, value);
-}
-
-function savedCount(data: unknown): number {
-  if (typeof data !== "object" || data === null || !("saved" in data)) {
-    return 0;
-  }
-
-  const saved = data.saved;
-
-  if (typeof saved !== "object" || saved === null) return 0;
-
-  let count = 0;
-
-  for (const key of [
-    "episodes",
-    "impressions",
-    "notes",
-    "profile",
-    "between",
-    "closedBetween",
-    "retired",
-    "views",
-  ]) {
-    const value = (saved as Record<string, unknown>)[key];
-    if (typeof value === "number") count += value;
-  }
-
-  return count;
 }
 
 type SessionView = {
@@ -380,20 +338,6 @@ function pinSessionView(
     ...pinned.filter((item) => item.about !== view.about),
     view,
   ];
-}
-
-function savedPart(data: unknown, key: string): number {
-  if (typeof data !== "object" || data === null || !("saved" in data)) {
-    return 0;
-  }
-
-  const saved = data.saved;
-
-  if (typeof saved !== "object" || saved === null) return 0;
-
-  const value = (saved as Record<string, unknown>)[key];
-
-  return typeof value === "number" ? value : 0;
 }
 
 export function parseCompanionAffect(data: unknown): CompanionAffect | null {
@@ -804,8 +748,6 @@ export function sessionFunctionDeclarations(residenceCity: string) {
 }
 
 export class RealtimeClient {
-  private static consolidationTail: Promise<void> = Promise.resolve();
-
   private session: Session | null = null;
   private socketConnected = false;
   private messageHandler: MessageHandler | null = null;
@@ -813,6 +755,24 @@ export class RealtimeClient {
   private currentUserText = "";
   private currentCompanionText = "";
   private pendingDialogue: DialogueTurn[] = [];
+  /**
+   * 1B-3C／0A：flush → outbox handoff（flush 路径不 HTTP）。
+   * 1B-3D-2A：仅显式 `drainConsolidationOutboxNow` 从 outbox 发送。
+   */
+  private readonly consolidationOutbox: ConsolidationOutbox;
+  private readonly drainFetchImpl: DrainFetch;
+  private readonly drainLeaseOwner: string;
+  private readonly drainNow: () => string;
+  private readonly flushDialogue: typeof flushDialogueThroughHandoff;
+  /** 实例级单 flight：重复显式 drain 共享同一 Promise。 */
+  private activeDrain: Promise<DrainConsolidationResult> | null = null;
+  /**
+   * 1B-3D-2B2-FIX：最近一次 hangup handoff 的可等待边界。
+   * 在 handoff 体 + post 调度回调（仅同步 schedule drain）结束后 settle；
+   * 不包含后续／前缀 drain HTTP。cleanup 只 await 此边界（见 cleanup）。
+   */
+  private hangupHandoffBoundary: Promise<void> = Promise.resolve();
+  private handoffRetryQueue: StickyHandoffBatch[] = [];
   private heldViews: SessionView[] = [];
   private pinnedViews: SessionView[] = [];
   private sessionViewsChanged = false;
@@ -920,8 +880,70 @@ export class RealtimeClient {
     console.warn(message);
   });
 
+  constructor(options: RealtimeClientOptions = {}) {
+    this.consolidationOutbox =
+      options.consolidationOutbox ?? new ConsolidationOutbox();
+    this.drainFetchImpl =
+      options.drainFetchImpl ??
+      ((input, init) => globalThis.fetch(input, init));
+    this.drainLeaseOwner =
+      options.drainLeaseOwner ??
+      (typeof globalThis.crypto !== "undefined" &&
+      typeof globalThis.crypto.randomUUID === "function"
+        ? `rc-${globalThis.crypto.randomUUID()}`
+        : `rc-${Date.now().toString(16)}`);
+    this.drainNow = options.drainNow ?? (() => new Date().toISOString());
+    this.flushDialogue = options.flushDialogue ?? flushDialogueThroughHandoff;
+  }
+
   setMessageHandler(handler: MessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  /**
+   * 触发 outbox 有界 drain。
+   * handoff、Live 接管和页面启动恢复共用 enqueueSerialDrain。
+   * 只发送 outbox 已持久化的冻结字段；不读 pendingDialogue／handoffRetryQueue。
+   * 不 auto-revive dead_letter；不改 ambiguous_lease 策略。
+   * 有意不用 `async`，以便重复调用返回同一 Promise 引用（单 flight）。
+   * 可选 `fetchImpl` 仅供离线测试注入 mock。
+   */
+  drainConsolidationOutboxNow(options?: {
+    fetchImpl?: DrainFetch;
+  }): Promise<DrainConsolidationResult> {
+    const fetchImpl = options?.fetchImpl ?? this.drainFetchImpl;
+    const run = () =>
+      drainConsolidationOutbox({
+        outbox: this.consolidationOutbox,
+        fetchImpl,
+        now: this.drainNow,
+        leaseOwner: this.drainLeaseOwner,
+      });
+
+    if (this.activeDrain) return this.activeDrain;
+
+    const flight = enqueueSerialDrain(run);
+    const tracked = flight.finally(() => {
+      if (this.activeDrain === tracked) {
+        this.activeDrain = null;
+      }
+    });
+    this.activeDrain = tracked;
+
+    void tracked
+      .then((result) => {
+        if (
+          result.outcomes.some((outcome) => outcome.kind === "sent_removed") &&
+          this.socketConnected
+        ) {
+          // 仅在 Live 会话中刷新；失败不影响 drain 完成语义。
+          void this.refreshThoughtContext(true, true).catch(() => undefined);
+          void this.refreshStandingBetween().catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+
+    return tracked;
   }
 
   /**
@@ -1121,13 +1143,18 @@ export class RealtimeClient {
       if (!this.isCurrentConnection(generation)) return;
 
       await Promise.race([
-        RealtimeClient.consolidationTail,
+        currentConsolidationTail(),
         new Promise<void>((resolve) => {
           window.setTimeout(resolve, 25_000);
         }),
       ]);
 
       if (!this.isCurrentConnection(generation)) return;
+
+      // P4：同实例重连时若 sticky 仍在，复用既有 scheduleConsolidation（不另开并发 flush）。
+      if (this.handoffRetryQueue.length > 0) {
+        this.scheduleConsolidation(1_000);
+      }
 
       let memoryContext = "当前没有可用的用户长期记忆。";
       let betweenContext = "还没有。";
@@ -1299,19 +1326,26 @@ export class RealtimeClient {
         },
       });
 
-      if (!adopted) {
-        // 迟到的 connect 结果已在 adoptOrRelease 中 close，不得再开麦或改状态。
-        return;
-      }
+      // 1B-3D-2B2：adopt 之后的副作用唯一入口（见 runPostAdoptConnectEffects）。
+      // 迟到未接管：helper 立即返回，不得再开麦或改状态。接管成功：有界 drain
+      // fire-and-forget（不 await），再 cue／开麦。cleanup 等待 hangupHandoffBoundary，
+      // 且 ahead activeDrain 时跳过等待（见 2B2-FIX），不把 drain HTTP 绑进拆除路径。
+      await runPostAdoptConnectEffects({
+        adopted,
+        scheduleBoundedDrainAfterConnect: () => {
+          this.scheduleBoundedDrainAfterConnect();
+        },
+        cueReunion: () => {
+          this.cueReunion(generation);
+        },
+        startMicrophone: () => this.startMicrophone(generation),
+        afterMicrophone: () => {
+          if (!this.isCurrentConnection(generation)) return;
 
-      this.cueReunion(generation);
-
-      await this.startMicrophone(generation);
-
-      if (!this.isCurrentConnection(generation)) return;
-
-      console.log("[RealtimeClient] Connected and microphone ready");
-      this.startAffectSettle(generation);
+          console.log("[RealtimeClient] Connected and microphone ready");
+          this.startAffectSettle(generation);
+        },
+      });
     } catch (error) {
       if (this.isCurrentConnection(generation)) {
         this.emit({ type: "error", error });
@@ -1376,27 +1410,27 @@ export class RealtimeClient {
   }
 
   private scheduleConsolidation(delayMs: number): void {
-    if (this.consolidateTimer !== null) {
-      window.clearTimeout(this.consolidateTimer);
-    }
-
-    this.consolidateTimer = window.setTimeout(() => {
-      this.consolidateTimer = null;
-      this.flushConsolidation();
-    }, delayMs);
+    // 行为与旧实现相同：清旧 timer 再设新 timer；逻辑在 scheduleExclusiveTimeout 以便离线测替换。
+    const state = { timerId: this.consolidateTimer };
+    scheduleExclusiveTimeout(
+      state,
+      delayMs,
+      () => {
+        this.consolidateTimer = null;
+        this.flushConsolidation();
+      },
+      {
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: (id) => {
+          window.clearTimeout(id);
+        },
+      },
+    );
+    this.consolidateTimer = state.timerId;
   }
 
   private flushConsolidation(): void {
-    const batch = this.pendingDialogue.splice(0);
-
-    if (!dialogueWorthKeeping(batch)) {
-      if (batch.length > 0) {
-        this.pendingDialogue = batch.concat(this.pendingDialogue);
-      }
-      return;
-    }
-
-    this.enqueueConsolidation(batch);
+    this.enqueueHandoffFlush("scheduled");
   }
 
   private flushDialogueNow(): void {
@@ -1417,99 +1451,275 @@ export class RealtimeClient {
     this.currentUserText = "";
     this.currentCompanionText = "";
 
-    const batch = this.pendingDialogue.splice(0);
-
-    if (dialogueWorthKeeping(batch)) {
-      this.enqueueConsolidation(batch);
-    }
+    this.enqueueHandoffFlush("hangup");
   }
 
-  private enqueueConsolidation(batch: DialogueTurn[]): void {
-    let failed = false;
+  /**
+   * 1B-3C／0A：只 handoff 到 outbox；成功后不从此路径直接 HTTP。
+   * 1B-3D-2B-B1：若本轮有 `persisted`，在 **handoff 队列任务结束之后** 再
+   * `scheduleBoundedDrainAfterHandoff`（禁止在 handoff then 内 await drain）。
+   * 1B-3D-2B2-FIX：hangup 额外暴露 `hangupHandoffBoundary`（handoff+post 同步结束即
+   * settle；不含 drain HTTP）。共享 `consolidationTail` 仍串行 handoff／drain。
+   * 开始时领取 pending 缓冲区，await 期间新对话写入新数组，结束后 merge（P2）。
+   */
+  private enqueueHandoffFlush(mode: "scheduled" | "hangup"): void {
+    let scheduleDrainAfterHandoff = false;
 
-    RealtimeClient.consolidationTail = RealtimeClient.consolidationTail
+    let settleHandoffBoundary = () => {};
+    const handoffBoundary = new Promise<void>((resolve) => {
+      settleHandoffBoundary = () => resolve();
+    });
+    if (mode === "hangup") {
+      this.hangupHandoffBoundary = handoffBoundary;
+    }
+
+    chainConsolidationTail((current) =>
+      current
       .catch(() => undefined)
       .then(async () => {
+        let merged = false;
+        let claimedPending: DialogueTurn[] | null = null;
+        let claimedRetry: StickyHandoffBatch[] | null = null;
+        let seedComplete = false;
+        let output: Awaited<
+          ReturnType<typeof flushDialogueThroughHandoff>
+        > | null = null;
+        const ledger: FlushBatchLedger = { records: [] };
+
         try {
-          const saved = await this.postConsolidation(batch);
-          this.consolidationDelay = 30_000;
+          const todayLocal = localDateString();
+          // P2：先摘下当前队列，再播种。播种抛错时按原数组收回，不留空队列。
+          const nextPending = this.pendingDialogue;
+          const nextRetry = this.handoffRetryQueue;
+          this.pendingDialogue = [];
+          this.handoffRetryQueue = [];
+          claimedPending = nextPending;
+          claimedRetry = nextRetry;
+          ledger.records = [];
 
-          if (saved.total > 0) {
-            this.emit({ type: "memory_updated" });
+          for (let index = 0; index < claimedRetry.length; index += 1) {
+            const entry = claimedRetry[index]!;
+            ledger.records.push({
+              source: "retry",
+              phase: "not_attempted",
+              batchId: entry.batchId,
+              sticky: entry,
+              turns: [...entry.turns],
+            });
           }
 
-          if (saved.views > 0 || saved.open) {
-            void this.refreshThoughtContext(saved.views > 0, saved.open);
+          ledger.records.push({
+            source: "pending",
+            phase: "not_attempted",
+            sticky: null,
+            turns: [...claimedPending],
+          });
+          seedComplete = true;
+
+          output = await this.flushDialogue({
+            mode,
+            outbox: this.consolidationOutbox,
+            pendingDialogue: claimedPending,
+            handoffRetryQueue: claimedRetry,
+            todayLocal,
+            ledger,
+          });
+
+          this.pendingDialogue = mergePendingAfterFlush(
+            output.pendingDialogue,
+            this.pendingDialogue,
+          ) as DialogueTurn[];
+          this.handoffRetryQueue = output.handoffRetryQueue;
+          merged = true;
+
+          for (const attempt of output.diagnostics.attempts) {
+            if (attempt.resultKind === "failed") {
+              console.warn(
+                "[Memory] consolidation handoff failed; batch retained for retry:",
+                attempt.errorCode,
+                attempt.errorMessage,
+              );
+            } else if (attempt.resultKind === "uncertain") {
+              console.warn(
+                "[Memory] consolidation handoff uncertain; batch retained with frozen identity:",
+                attempt.batchId,
+              );
+            } else if (attempt.resultKind === "already_dead_letter") {
+              console.warn(
+                "[Memory] consolidation batch already dead_letter in outbox; not auto-revived:",
+                attempt.batchId,
+              );
+            } else if (attempt.resultKind === "persisted") {
+              scheduleDrainAfterHandoff = true;
+            }
           }
 
-          if (saved.between) {
-            void this.refreshStandingBetween();
-          }
-        } catch (error) {
-          failed = true;
-          this.pendingDialogue = batch.concat(this.pendingDialogue);
-
-          if (error instanceof ConsolidationDeferred) {
-            this.scheduleConsolidation(error.retryAfterMs);
-          } else {
-            console.warn("[Memory] consolidation failed:", error);
+          if (output.diagnostics.followUp === "failure_backoff") {
             this.scheduleConsolidation(this.consolidationDelay);
             this.consolidationDelay = Math.min(
               this.consolidationDelay * 2,
               120_000,
             );
+          } else if (output.diagnostics.followUp === "continue_pending") {
+            this.scheduleConsolidation(1_000);
+            this.consolidationDelay = 30_000;
+          }
+        } catch (error) {
+          console.warn("[Memory] consolidation handoff task failed:", error);
+          if (!merged && claimedPending && claimedRetry) {
+            let applied = false;
+
+            try {
+              if (!seedComplete) {
+                const pending: DialogueTurn[] = [];
+
+                for (let index = 0; index < claimedPending.length; index += 1) {
+                  pending.push(claimedPending[index]!);
+                }
+
+                for (
+                  let index = 0;
+                  index < this.pendingDialogue.length;
+                  index += 1
+                ) {
+                  pending.push(this.pendingDialogue[index]!);
+                }
+
+                this.pendingDialogue = pending;
+                const persistedIds = new Set<string>();
+
+                for (let index = 0; index < ledger.records.length; index += 1) {
+                  const record = ledger.records[index]!;
+                  if (record.phase !== "persisted") continue;
+                  if (record.batchId) persistedIds.add(record.batchId);
+                  if (record.sticky) persistedIds.add(record.sticky.batchId);
+                }
+
+                this.handoffRetryQueue =
+                  persistedIds.size === 0
+                    ? claimedRetry
+                    : claimedRetry.filter(
+                        (entry) => !persistedIds.has(entry.batchId),
+                      );
+                applied = true;
+
+                if (claimedRetry.length > 0 || pending.length > 0) {
+                  this.scheduleConsolidation(this.consolidationDelay);
+                  this.consolidationDelay = Math.min(
+                    this.consolidationDelay * 2,
+                    120_000,
+                  );
+                }
+              } else {
+              const recovered = materializeFlushLedger(ledger);
+              this.pendingDialogue = mergePendingAfterFlush(
+                recovered.pendingDialogue,
+                this.pendingDialogue,
+              ) as DialogueTurn[];
+              this.handoffRetryQueue = recovered.handoffRetryQueue;
+              applied = true;
+
+              if (
+                ledger.records.some((record) => record.phase === "persisted")
+              ) {
+                scheduleDrainAfterHandoff = true;
+              }
+
+              if (
+                recovered.handoffRetryQueue.length > 0 ||
+                recovered.pendingDialogue.length > 0
+              ) {
+                this.scheduleConsolidation(this.consolidationDelay);
+                this.consolidationDelay = Math.min(
+                  this.consolidationDelay * 2,
+                  120_000,
+                );
+              }
+              }
+            } catch (restoreError) {
+              console.warn(
+                "[Memory] consolidation handoff restore failed:",
+                restoreError,
+              );
+              if (!applied && !seedComplete) {
+                const arrived = this.pendingDialogue;
+                this.handoffRetryQueue = claimedRetry;
+                this.pendingDialogue = claimedPending;
+
+                for (let index = 0; index < arrived.length; index += 1) {
+                  this.pendingDialogue.push(arrived[index]!);
+                }
+              } else if (!applied) {
+                const retry: StickyHandoffBatch[] = [];
+                const pending: DialogueTurn[] = [];
+
+                for (let index = 0; index < ledger.records.length; index += 1) {
+                  const record = ledger.records[index]!;
+                  if (record.phase === "persisted" || record.phase === "dropped") {
+                    continue;
+                  }
+                  if (record.sticky && record.source === "retry") {
+                    retry.push(record.sticky);
+                    continue;
+                  }
+                  if (record.sticky && record.phase !== "not_attempted") {
+                    retry.push(record.sticky);
+                    continue;
+                  }
+                  for (let turnIndex = 0; turnIndex < record.turns.length; turnIndex += 1) {
+                    pending.push(record.turns[turnIndex]! as DialogueTurn);
+                  }
+                }
+
+                this.handoffRetryQueue = retry;
+                this.pendingDialogue = mergePendingAfterFlush(
+                  pending,
+                  this.pendingDialogue,
+                ) as DialogueTurn[];
+              }
+            }
           }
         }
-
-        if (!failed && this.pendingDialogue.length > 0) {
-          this.scheduleConsolidation(1_000);
-        }
-      });
+      })
+      .then(() => {
+        // 后置环：handoff 体已结束。此处只火后忘调度，禁止 await drain
+        // （否则 drain 挂在同一 consolidationTail 之后会造成自等待死锁）。
+        if (!scheduleDrainAfterHandoff) return;
+        this.scheduleBoundedDrainAfterHandoff();
+      })
+      .finally(() => {
+        // hangupBoundary：本段 handoff+post 同步路径结束即 settle（成功或失败）。
+        // settle ≠ persist 成功；失败时 sticky 仍在 handoffRetryQueue。
+        settleHandoffBoundary();
+      })
+      // 回调抛错只留在日志里。boundary 已经 resolve；drain flight 不经这条链返回。
+      .catch((error: unknown) => {
+        console.warn(
+          "[Memory] consolidation handoff tail recovered after failure:",
+          error,
+        );
+      }),
+    );
   }
 
-  private async postConsolidation(
-    batch: DialogueTurn[],
-  ): Promise<{ total: number; views: number; open: boolean; between: boolean }> {
-    const response = await fetch("/api/memory/consolidate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        occurredOn: localDateString(),
-        turns: batch,
-      }),
+  /**
+   * 1B-3D-2B-B1：handoff 成功持久化后的有界 drain 入口。
+   * 必须在 consolidationTail 的 handoff 任务之外调用；不得被 handoff 任务 await。
+   */
+  private scheduleBoundedDrainAfterHandoff(): void {
+    void this.drainConsolidationOutboxNow().catch((error: unknown) => {
+      console.warn("[Memory] auto drain after handoff failed:", error);
     });
+  }
 
-    if (!response.ok) {
-      if (response.status === 400) {
-        console.warn(
-          "[Memory] consolidation rejected:",
-          response.status,
-        );
-        return { total: 0, views: 0, open: false, between: false };
-      }
-
-      throw new Error(`consolidation failed: ${response.status}`);
-    }
-
-    const data: unknown = await response.json();
-    const retryAfterMs = readRetryAfter(data);
-
-    if (retryAfterMs > 0) {
-      throw new ConsolidationDeferred(retryAfterMs);
-    }
-
-    return {
-      total: savedCount(data),
-      views: savedPart(data, "views"),
-      open:
-        savedPart(data, "unresolved") +
-          savedPart(data, "question") +
-          savedPart(data, "closedUnresolved") +
-          savedPart(data, "closedQuestion") >
-        0,
-      between:
-        savedPart(data, "between") + savedPart(data, "closedBetween") > 0,
-    };
+  /**
+   * 1B-3D-2B2：Live session 接管成功后的有界 drain 入口。
+   * 仅由 connect 在 adoptOrReleaseLiveSession 成功之后调用；禁止 await。
+   */
+  private scheduleBoundedDrainAfterConnect(): void {
+    void this.drainConsolidationOutboxNow().catch((error: unknown) => {
+      console.warn("[Memory] auto drain after connect failed:", error);
+    });
   }
 
   private async loadThoughtContext(): Promise<{
@@ -3866,7 +4076,13 @@ export class RealtimeClient {
       return this.cleanupPromise;
     }
 
+    // P3／2B2-FIX：入队 hangup handoff，捕获 hangupHandoffBoundary（非完整
+    // consolidationTail）。若 connect／显式 drain 已占 activeDrain，hangup 仍排在
+    // 共享 tail 之后，但 cleanup 不等待该 drain HTTP（timeoutMs=0 → 非保证持久化）。
     this.flushDialogueNow();
+    const hangupHandoffBoundary = this.hangupHandoffBoundary;
+    const aheadDrainSkipsWait =
+      this.activeDrain !== null || consolidationDrainInFlight();
 
     // 让所有旧异步回调立即失效。
     this.connectionGeneration++;
@@ -4001,6 +4217,27 @@ export class RealtimeClient {
     releaseLiveSession(session);
 
     const task = (async () => {
+      // P3／2B2-FIX：软断开有界等待 hangupHandoffBoundary；超时 ≠ 成功；
+      // 不取消在飞 handoff／drain。ahead activeDrain 时立即 timeout 语义，
+      // 避免把 drain HTTP 绑进拆除等待。硬关闭／刷新／崩溃不在此保证范围内。
+      const waitStatus = await awaitHandoffTailWithTimeout(
+        hangupHandoffBoundary,
+        aheadDrainSkipsWait ? 0 : CLEANUP_HANDOFF_WAIT_MS,
+      );
+
+      if (waitStatus === "timeout") {
+        console.warn(
+          aheadDrainSkipsWait
+            ? "[Memory] cleanup skipped handoff wait (drain in flight); hangup remains queued; batches retained for retry if still in RAM:"
+            : "[Memory] cleanup handoff wait timed out; batches retained for retry if still in RAM:",
+          {
+            sticky: this.handoffRetryQueue.length,
+            pending: this.pendingDialogue.length,
+            aheadDrain: aheadDrainSkipsWait,
+          },
+        );
+      }
+
       const closeTasks: Promise<void>[] = [];
 
       if (inputContext) {

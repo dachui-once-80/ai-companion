@@ -22,11 +22,21 @@
     "check:web:reminder-client": "pnpm --filter web check:reminder-client",
     "check:web:due-wait": "pnpm --filter web check:due-wait",
     "check:web:turn-transcript": "pnpm --filter web check:turn-transcript",
+    "check:web:consolidate-result": "pnpm --filter web check:consolidate-result",
+    "check:web:consolidation-payload": "pnpm --filter web check:consolidation-payload",
+    "check:web:consolidation-outbox": "pnpm --filter web check:consolidation-outbox",
+    "check:web:consolidation-handoff": "pnpm --filter web check:consolidation-handoff",
+    "check:web:consolidation-drain": "pnpm --filter web check:consolidation-drain",
+    "check:web:consolidation-drain-wire": "pnpm --filter web check:consolidation-drain-wire",
+    "check:web:consolidation-refresh-recovery": "pnpm --filter web check:consolidation-refresh-recovery",
+    "check:web:consolidation-isolated-drain": "pnpm --filter web check:consolidation-isolated-drain",
+    "check:web:consolidation-flush-handoff": "pnpm --filter web check:consolidation-flush-handoff",
+    "check:web:consolidation-cleanup-handoff": "pnpm --filter web check:consolidation-cleanup-handoff",
     "check:web:vite-proxy-auth": "pnpm --filter web check:vite-proxy-auth",
     "check:web:vite-dev-proxy-auth": "pnpm --filter web check:vite-dev-proxy-auth",
     "check:web:companion-token-leak": "pnpm --filter web check:companion-token-leak",
     "check:server:reminder-claim": "pnpm --filter server exec tsx src/scripts/reminder-claim.check.ts",
-    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:web:turn-transcript && pnpm check:web:vite-proxy-auth && pnpm check:web:vite-dev-proxy-auth && pnpm check:web:companion-token-leak && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
+    "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:web:turn-transcript && pnpm check:web:consolidate-result && pnpm check:web:consolidation-payload && pnpm check:web:consolidation-outbox && pnpm check:web:consolidation-handoff && pnpm check:web:consolidation-drain && pnpm check:web:consolidation-drain-wire && pnpm check:web:consolidation-refresh-recovery && pnpm check:web:consolidation-isolated-drain && pnpm check:web:consolidation-flush-handoff && pnpm check:web:consolidation-cleanup-handoff && pnpm check:web:vite-proxy-auth && pnpm check:web:vite-dev-proxy-auth && pnpm check:web:companion-token-leak && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {
