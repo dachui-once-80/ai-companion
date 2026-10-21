@@ -14,6 +14,8 @@
     "check:server:type": "pnpm --filter server typecheck",
     "check:server:lint": "pnpm --filter server lint",
     "check:offline": "pnpm --filter server test:offline",
+    "check:consolidate-idempotency": "pnpm --filter server check:consolidate-idempotency",
+    "check:consolidation-http-idempotency": "pnpm --filter server check:consolidation-http-idempotency",
     "check:web:live-session": "pnpm --filter web check:live-session-lifecycle",
     "check:web:audio-playback": "pnpm --filter web check:audio-playback",
     "check:web:connection-feedback": "pnpm --filter web check:connection-feedback",

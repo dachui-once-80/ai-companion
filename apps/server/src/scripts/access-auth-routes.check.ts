@@ -21,6 +21,10 @@ const identitySource = readFileSync(
   join(root, "src/companion/identityRoutes.ts"),
   "utf8",
 );
+const consolidateRouteSource = readFileSync(
+  join(root, "src/memory/consolidateRoute.ts"),
+  "utf8",
+);
 
 type RouteSpec = { method: string; path: string };
 
@@ -39,7 +43,8 @@ function collectRoutes(source: string): RouteSpec[] {
 
 const indexRoutes = collectRoutes(indexSource);
 const identityRoutes = collectRoutes(identitySource);
-const allRoutes = [...indexRoutes, ...identityRoutes];
+const consolidateRoutes = collectRoutes(consolidateRouteSource);
+const allRoutes = [...indexRoutes, ...identityRoutes, ...consolidateRoutes];
 
 const apiRoutes = allRoutes.filter((route) => route.path.startsWith("/api/"));
 assert.ok(
@@ -58,6 +63,7 @@ assert.match(
   /app\.use\(createCompanionAccessMiddleware\(companionAccessToken\)\)/,
 );
 assert.match(indexSource, /registerCompanionIdentityRoutes\(app, companion\)/);
+assert.match(indexSource, /registerConsolidateRoute\(/);
 
 const upgradeSource = readFileSync(
   join(root, "src/gemini/liveProxyUpgrade.ts"),
@@ -89,6 +95,13 @@ const identityRegisterIndex = indexSource.indexOf(
 assert.ok(
   identityRegisterIndex > middlewareIndex,
   "identity routes register after middleware (still covered by earlier app.use)",
+);
+const consolidateRegisterIndex = indexSource.indexOf(
+  "registerConsolidateRoute(",
+);
+assert.ok(
+  consolidateRegisterIndex > middlewareIndex,
+  "consolidate route registers after middleware (still covered by earlier app.use)",
 );
 
 function expandPath(path: string): string {

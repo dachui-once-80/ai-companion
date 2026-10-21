@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit --pretty false",
     "lint": "eslint .",
     "test:offline": "tsx src/scripts/offline.run.ts",
+    "check:consolidate-idempotency": "tsx src/scripts/consolidate-idempotency.check.ts",
+    "check:consolidation-http-idempotency": "tsx src/scripts/consolidation-http-idempotency.check.ts",
     "check:live:prompt": "tsx src/scripts/prompt.live.ts",
     "check:live:persona": "tsx src/scripts/persona.live.ts",
     "check:live:meaning": "tsx src/scripts/meaning.live.ts",

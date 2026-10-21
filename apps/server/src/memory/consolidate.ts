@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
+import { eq } from "drizzle-orm";
 import {
   inventsCompanionLife,
   isPersonaRewrite,
   subjectKey,
   type ThoughtStore,
 } from "../companion/ThoughtStore";
+import { db } from "../db";
+import { consolidationReceipts } from "../db/schema";
 import {
   blocksProfileName,
   classifyBetweenNote,
@@ -27,8 +31,30 @@ import {
   normalizeLabel,
   normalizeTheme,
 } from "./openMemory";
+import {
+  canonicalConsolidationPayloadJson,
+  normalizeConsolidationOccurredOn,
+  normalizeConsolidationTurnText,
+} from "./consolidationPayload";
 
 export class ConsolidationInputError extends Error {}
+
+/** 同 batchId 已登记为另一份 payload。 */
+export class ConsolidationPayloadConflictError extends Error {}
+
+/**
+ * 仅在 LLM `generate` 阶段识别到的配额／限流错误。
+ * 路由层可据此返回 200 + retryAfterMs；apply／收据写入不得包装为此类。
+ */
+export class ConsolidationQuotaError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(message: string, retryAfterMs: number, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ConsolidationQuotaError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
 
 export type DialogueTurn = {
   role: "user" | "companion" | "overheard";
@@ -74,7 +100,6 @@ type ConsolidationPlan = {
 
 const MAX_BETWEEN = 6;
 const MAX_TURNS = 40;
-const MAX_TURN_CHARS = 2_000;
 const MAX_TOTAL_CHARS = 12_000;
 const MAX_ITEMS = 4;
 const MAX_CONTENT_CHARS = 500;
@@ -222,18 +247,182 @@ export const consolidationResponseSchema = {
   ],
 };
 
-export function readConsolidationRequest(body: unknown): {
+export type ConsolidationRequest = {
   today: string;
   turns: DialogueTurn[];
+  batchId?: string;
+  payloadHash?: string;
+};
+
+/**
+ * 对**已规范化**的 occurredOn + turns 做 SHA-256 hex（Node sync）。
+ * 不再二次 trim／过滤；canonical 见 consolidationPayload.ts。
+ */
+export function computeConsolidationPayloadHash(
+  occurredOn: string,
+  turns: readonly DialogueTurn[],
+): string {
+  return createHash("sha256")
+    .update(canonicalConsolidationPayloadJson(occurredOn, turns), "utf8")
+    .digest("hex");
+}
+
+/** 仅用于识别 generate 阶段的配额错误；不得用于 apply／DB 错误。 */
+function generateQuotaRetryMs(error: unknown): number | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const status =
+    typeof error === "object" && error !== null && "status" in error
+      ? (error as { status: unknown }).status
+      : undefined;
+  const quota =
+    status === 429 ||
+    message.includes("RESOURCE_EXHAUSTED") ||
+    message.includes("Quota exceeded");
+
+  if (!quota) return null;
+
+  const delay = message.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
+
+  if (delay) {
+    return Math.ceil(Number(delay[1]) * 1000);
+  }
+
+  return 15 * 60 * 1000;
+}
+
+/**
+ * 将 consolidate 失败映射为 HTTP 状态与 JSON 体。
+ * 只有 ConsolidationQuotaError 会得到 200 + retryAfterMs。
+ */
+export function httpBodyForConsolidationError(error: unknown): {
+  status: number;
+  json: Record<string, unknown>;
 } {
+  if (error instanceof ConsolidationInputError) {
+    return { status: 400, json: { error: error.message } };
+  }
+
+  if (error instanceof ConsolidationPayloadConflictError) {
+    return { status: 409, json: { error: error.message } };
+  }
+
+  if (error instanceof ConsolidationQuotaError) {
+    return {
+      status: 200,
+      json: {
+        ...emptyResult(),
+        retryAfterMs: error.retryAfterMs,
+      },
+    };
+  }
+
+  return {
+    status: 502,
+    json: {
+      error: error instanceof Error ? error.message : String(error),
+    },
+  };
+}
+
+function readOptionalBatchId(record: Record<string, unknown>): string | undefined {
+  if (!("batchId" in record) || record.batchId === undefined || record.batchId === null) {
+    return undefined;
+  }
+
+  if (typeof record.batchId !== "string") {
+    throw new ConsolidationInputError("batchId must be a string");
+  }
+
+  const batchId = record.batchId.trim();
+
+  if (!batchId) {
+    throw new ConsolidationInputError("batchId must not be empty");
+  }
+
+  if (batchId.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(batchId)) {
+    throw new ConsolidationInputError("batchId is invalid");
+  }
+
+  return batchId;
+}
+
+function readOptionalPayloadHash(
+  record: Record<string, unknown>,
+  batchId: string | undefined,
+): string | undefined {
+  const raw = record.payloadHash ?? record.payload_hash;
+
+  if (batchId === undefined) {
+    if (raw !== undefined && raw !== null && raw !== "") {
+      throw new ConsolidationInputError("payloadHash requires batchId");
+    }
+
+    return undefined;
+  }
+
+  if (typeof raw !== "string") {
+    throw new ConsolidationInputError("payloadHash is required when batchId is set");
+  }
+
+  const payloadHash = raw.trim().toLowerCase();
+
+  if (!/^[a-f0-9]{64}$/.test(payloadHash)) {
+    throw new ConsolidationInputError("payloadHash must be a sha256 hex digest");
+  }
+
+  return payloadHash;
+}
+
+/**
+ * 带 batchId 的新协议：严格日历日，不作两日窗口改写。
+ * 使用 UTC 组件 round-trip，拒绝 02-31 等 Date.parse 溢出伪日期。
+ */
+export function parseStrictConsolidationOccurredOn(input: unknown): string {
+  if (input === undefined || input === null) {
+    throw new ConsolidationInputError("occurredOn is required when batchId is set");
+  }
+
+  if (typeof input !== "string") {
+    throw new ConsolidationInputError("occurredOn must be a string");
+  }
+
+  const trimmed = input.trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new ConsolidationInputError("occurredOn must be YYYY-MM-DD");
+  }
+
+  const year = Number(trimmed.slice(0, 4));
+  const month = Number(trimmed.slice(5, 7));
+  const day = Number(trimmed.slice(8, 10));
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    throw new ConsolidationInputError("occurredOn is not a real calendar date");
+  }
+
+  const utc = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    utc.getUTCFullYear() !== year ||
+    utc.getUTCMonth() !== month - 1 ||
+    utc.getUTCDate() !== day
+  ) {
+    throw new ConsolidationInputError("occurredOn is not a real calendar date");
+  }
+
+  return trimmed;
+}
+
+export function readConsolidationRequest(body: unknown): ConsolidationRequest {
   if (typeof body !== "object" || body === null) {
     throw new ConsolidationInputError("Request body is required");
   }
 
   const record = body as Record<string, unknown>;
-  const today = resolveConversationDate(
-    typeof record.occurredOn === "string" ? record.occurredOn : undefined,
-  );
 
   if (!Array.isArray(record.turns) || record.turns.length === 0) {
     throw new ConsolidationInputError("turns are required");
@@ -261,9 +450,9 @@ export function readConsolidationRequest(body: unknown): {
       throw new ConsolidationInputError("Invalid turn text");
     }
 
-    const text = turn.text.trim().slice(0, MAX_TURN_CHARS);
+    const text = normalizeConsolidationTurnText(turn.text);
 
-    if (!text || text.includes("内部状态")) continue;
+    if (text === null) continue;
 
     total += text.length;
 
@@ -278,7 +467,111 @@ export function readConsolidationRequest(body: unknown): {
     throw new ConsolidationInputError("A user turn is required");
   }
 
-  return { today, turns };
+  const batchId = readOptionalBatchId(record);
+  const payloadHash = readOptionalPayloadHash(record, batchId);
+
+  // 方案 A：有 batchId 时保留经严格校验的原始日期；无 batchId 仍用两日窗口。
+  const today =
+    batchId !== undefined
+      ? parseStrictConsolidationOccurredOn(record.occurredOn)
+      : normalizeConsolidationOccurredOn(
+          typeof record.occurredOn === "string" ? record.occurredOn : undefined,
+          formatLocalDate(),
+        );
+
+  if (batchId !== undefined && payloadHash !== undefined) {
+    const expected = computeConsolidationPayloadHash(today, turns);
+
+    if (payloadHash !== expected) {
+      throw new ConsolidationInputError("payloadHash does not match request body");
+    }
+  }
+
+  return { today, turns, batchId, payloadHash };
+}
+
+function parseStoredResult(raw: string): ConsolidationResult {
+  const parsed: unknown = JSON.parse(raw);
+
+  if (typeof parsed !== "object" || parsed === null || !("saved" in parsed)) {
+    throw new Error("Invalid consolidation receipt payload");
+  }
+
+  return parsed as ConsolidationResult;
+}
+
+function readReceipt(batchId: string): {
+  payloadHash: string;
+  result: ConsolidationResult;
+} | null {
+  const row = db
+    .select()
+    .from(consolidationReceipts)
+    .where(eq(consolidationReceipts.batchId, batchId))
+    .get();
+
+  if (!row) return null;
+
+  return {
+    payloadHash: row.payloadHash,
+    result: parseStoredResult(row.resultJson),
+  };
+}
+
+function insertReceipt(input: {
+  batchId: string;
+  payloadHash: string;
+  occurredOn: string;
+  result: ConsolidationResult;
+}): void {
+  db.insert(consolidationReceipts)
+    .values({
+      batchId: input.batchId,
+      payloadHash: input.payloadHash,
+      resultJson: JSON.stringify(input.result),
+      occurredOn: input.occurredOn,
+      createdAt: new Date().toISOString(),
+    })
+    .run();
+}
+
+/**
+ * 同步事务：再次查收据 → apply → 写收据。
+ * LLM 不得进入此函数。
+ */
+export function commitConsolidationWithReceipt(options: {
+  batchId: string;
+  payloadHash: string;
+  occurredOn: string;
+  apply: () => ConsolidationResult;
+}): ConsolidationResult {
+  return db.transaction(
+    () => {
+      const existing = readReceipt(options.batchId);
+
+      if (existing) {
+        if (existing.payloadHash !== options.payloadHash) {
+          throw new ConsolidationPayloadConflictError(
+            "batchId was already used with a different payload",
+          );
+        }
+
+        return existing.result;
+      }
+
+      const result = options.apply();
+
+      insertReceipt({
+        batchId: options.batchId,
+        payloadHash: options.payloadHash,
+        occurredOn: options.occurredOn,
+        result,
+      });
+
+      return result;
+    },
+    { behavior: "immediate" },
+  );
 }
 
 export function parseConsolidationResult(
@@ -630,31 +923,85 @@ export async function consolidateConversation(options: {
   thoughts: ThoughtStore;
   body: unknown;
 }): Promise<ConsolidationResult> {
-  const { today, turns } = readConsolidationRequest(options.body);
+  const { today, turns, batchId, payloadHash } =
+    readConsolidationRequest(options.body);
+
+  if (batchId !== undefined && payloadHash !== undefined) {
+    const existing = readReceipt(batchId);
+
+    if (existing) {
+      if (existing.payloadHash !== payloadHash) {
+        throw new ConsolidationPayloadConflictError(
+          "batchId was already used with a different payload",
+        );
+      }
+
+      return existing.result;
+    }
+  }
+
   const heardText = turns
     .filter((turn) => turn.role === "user" || turn.role === "overheard")
     .map((turn) => turn.text)
     .join("");
 
-  if (heardText.replace(/\s+/g, "").length < 4 || isDisposableLookup(turns)) {
-    return emptyResult();
+  const disposable =
+    heardText.replace(/\s+/g, "").length < 4 || isDisposableLookup(turns);
+
+  if (disposable) {
+    const result = emptyResult();
+
+    if (batchId !== undefined && payloadHash !== undefined) {
+      return commitConsolidationWithReceipt({
+        batchId,
+        payloadHash,
+        occurredOn: today,
+        apply: () => result,
+      });
+    }
+
+    return result;
   }
 
-  const raw = await options.generate(
-    buildPrompt(
-      today,
-      options.memory.describeForReview(),
-      options.memory.describeBetween(),
-      options.thoughts.describeViews(),
-      options.thoughts.describeOpen("unresolved"),
-      options.thoughts.describeOpen("question"),
-      turns,
-    ),
-  );
+  // LLM 必须在事务外；仅此处的配额错误可包装为 ConsolidationQuotaError。
+  let raw: string;
+
+  try {
+    raw = await options.generate(
+      buildPrompt(
+        today,
+        options.memory.describeForReview(),
+        options.memory.describeBetween(),
+        options.thoughts.describeViews(),
+        options.thoughts.describeOpen("unresolved"),
+        options.thoughts.describeOpen("question"),
+        turns,
+      ),
+    );
+  } catch (error) {
+    const retryAfterMs = generateQuotaRetryMs(error);
+
+    if (retryAfterMs !== null) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ConsolidationQuotaError(message, retryAfterMs, { cause: error });
+    }
+
+    throw error;
+  }
+
   const plan = parseConsolidationResult(raw, today);
   keepStatedWhenSad(plan, turns);
 
-  return applyConsolidation(options.memory, options.thoughts, plan);
+  if (batchId === undefined || payloadHash === undefined) {
+    return applyConsolidation(options.memory, options.thoughts, plan);
+  }
+
+  return commitConsolidationWithReceipt({
+    batchId,
+    payloadHash,
+    occurredOn: today,
+    apply: () => applyConsolidation(options.memory, options.thoughts, plan),
+  });
 }
 
 function keepStatedWhenSad(
@@ -1021,24 +1368,6 @@ function readSubject(value: unknown): string | null {
   if (about.length < 2 || about.length > 16) return null;
 
   return about;
-}
-
-function resolveConversationDate(input: string | undefined): string {
-  const today = formatLocalDate();
-
-  if (!input || !/^\d{4}-\d{2}-\d{2}$/.test(input)) return today;
-
-  const requested = Date.parse(`${input}T00:00:00`);
-  const current = Date.parse(`${today}T00:00:00`);
-
-  if (
-    Number.isNaN(requested) ||
-    Math.abs(requested - current) > 2 * 24 * 60 * 60 * 1000
-  ) {
-    return today;
-  }
-
-  return input;
 }
 
 function stripJsonFence(raw: string): string {

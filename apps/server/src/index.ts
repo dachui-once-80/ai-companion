@@ -34,10 +34,9 @@ import { MemoryStore } from "./memory/MemoryStore";
 import { MemoryManager } from "./memory/MemoryManager";
 import { createGeminiMeaning } from "./memory/meaning";
 import {
-  ConsolidationInputError,
-  consolidateConversation,
   consolidationResponseSchema,
 } from "./memory/consolidate";
+import { registerConsolidateRoute } from "./memory/consolidateRoute";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 import { db } from "./db";
@@ -1340,97 +1339,28 @@ app.get("/api/memory/relevant", async (req, res) => {
   }
 });
 
-function quotaRetryMs(error: unknown): number | null {
-  const message = error instanceof Error ? error.message : String(error);
-  const status =
-    typeof error === "object" &&
-    error !== null &&
-    "status" in error
-      ? (error as { status: unknown }).status
-      : undefined;
-  const quota =
-    status === 429 ||
-    message.includes("RESOURCE_EXHAUSTED") ||
-    message.includes("Quota exceeded");
-
-  if (!quota) return null;
-
-  const delay = message.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
-
-  if (delay) {
-    return Math.ceil(Number(delay[1]) * 1000);
-  }
-
-  return 15 * 60 * 1000;
-}
-
-app.post("/api/memory/consolidate", async (req, res) => {
-  try {
-    const result = await consolidateConversation({
-      body: req.body,
-      memory: memoryManager,
-      thoughts: thoughtStore,
-      generate: async (prompt) => {
-        const response = await gemini.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: prompt,
-          config: {
-            temperature: 0.2,
-            responseMimeType: "application/json",
-            responseJsonSchema: consolidationResponseSchema,
-          },
-        });
-
-        const text = response.text;
-
-        if (!text?.trim()) {
-          throw new Error("Empty consolidation response");
-        }
-
-        return text;
+registerConsolidateRoute(app, {
+  memory: memoryManager,
+  thoughts: thoughtStore,
+  generate: async (prompt) => {
+    const response = await gemini.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: prompt,
+      config: {
+        temperature: 0.2,
+        responseMimeType: "application/json",
+        responseJsonSchema: consolidationResponseSchema,
       },
     });
 
-    console.log("[Memory] consolidated:", result.saved);
-    res.json(result);
-  } catch (error) {
-    if (error instanceof ConsolidationInputError) {
-      res.status(400).json({ error: error.message });
-      return;
+    const text = response.text;
+
+    if (!text?.trim()) {
+      throw new Error("Empty consolidation response");
     }
 
-    const retryAfterMs = quotaRetryMs(error);
-
-    if (retryAfterMs !== null) {
-      const seconds = Math.max(1, Math.round(retryAfterMs / 1000));
-      console.warn(
-        `[Memory] consolidation paused for ${seconds}s (quota)`,
-      );
-      res.json({
-        saved: {
-          episodes: 0,
-          impressions: 0,
-          notes: 0,
-          profile: 0,
-          between: 0,
-          closedBetween: 0,
-          retired: 0,
-          views: 0,
-          unresolved: 0,
-          question: 0,
-          closedUnresolved: 0,
-          closedQuestion: 0,
-        },
-        retryAfterMs,
-      });
-      return;
-    }
-
-    console.error("[Memory] consolidation failed:", error);
-    res.status(502).json({
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+    return text;
+  },
 });
 
 app.patch("/api/memory/:id", (req, res) => {

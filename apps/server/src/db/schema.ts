@@ -78,6 +78,15 @@ export const companionVoice = sqliteTable("companion_voice", {
   leftAt: text("left_at").notNull(),
 });
 
+/** consolidate 幂等收据：同 batch_id + payload_hash 不重复 apply。 */
+export const consolidationReceipts = sqliteTable("consolidation_receipts", {
+  batchId: text("batch_id").primaryKey(),
+  payloadHash: text("payload_hash").notNull(),
+  resultJson: text("result_json").notNull(),
+  occurredOn: text("occurred_on").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey(),
   title: text("title").notNull(),
