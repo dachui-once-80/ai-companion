@@ -35,6 +35,11 @@
     "check:web:vite-proxy-auth": "pnpm --filter web check:vite-proxy-auth",
     "check:web:vite-dev-proxy-auth": "pnpm --filter web check:vite-dev-proxy-auth",
     "check:web:companion-token-leak": "pnpm --filter web check:companion-token-leak",
+    "check:web:e2e:consolidation-intercept-p0": "pnpm --filter web check:e2e:consolidation-intercept-p0",
+    "check:web:e2e:consolidation-refresh-p1a": "pnpm --filter web check:e2e:consolidation-refresh-p1a",
+    "check:web:e2e:consolidation-app-origin-p1b": "pnpm --filter web check:e2e:consolidation-app-origin-p1b",
+    "check:web:e2e:consolidation-startup-drain-p1c": "pnpm --filter web check:e2e:consolidation-startup-drain-p1c",
+    "check:web:p1c-origin": "pnpm --filter web check:p1c-origin",
     "check:server:reminder-claim": "pnpm --filter server exec tsx src/scripts/reminder-claim.check.ts",
     "check": "pnpm check:web:type && pnpm check:web:lint && pnpm check:web:build && pnpm check:server:type && pnpm check:server:lint && pnpm check:offline && pnpm check:web:live-session && pnpm check:web:audio-playback && pnpm check:web:connection-feedback && pnpm check:web:reminder-client && pnpm check:web:due-wait && pnpm check:web:turn-transcript && pnpm check:web:consolidate-result && pnpm check:web:consolidation-payload && pnpm check:web:consolidation-outbox && pnpm check:web:consolidation-handoff && pnpm check:web:consolidation-drain && pnpm check:web:consolidation-drain-wire && pnpm check:web:consolidation-refresh-recovery && pnpm check:web:consolidation-isolated-drain && pnpm check:web:consolidation-flush-handoff && pnpm check:web:consolidation-cleanup-handoff && pnpm check:web:vite-proxy-auth && pnpm check:web:vite-dev-proxy-auth && pnpm check:web:companion-token-leak && pnpm check:server:reminder-claim && pnpm --filter web check:identity-race"
   },

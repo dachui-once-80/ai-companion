@@ -27,6 +27,11 @@
     "check:vite-proxy-auth": "tsx scripts/vite-proxy-auth.check.ts",
     "check:vite-dev-proxy-auth": "tsx scripts/vite-dev-proxy-auth.check.ts",
     "check:companion-token-leak": "tsx scripts/companion-token-leak.check.ts",
+    "check:e2e:consolidation-intercept-p0": "playwright test -c playwright.config.ts --project=chromium-p0",
+    "check:e2e:consolidation-refresh-p1a": "playwright test -c playwright.config.ts --project=chromium-p1a",
+    "check:e2e:consolidation-app-origin-p1b": "playwright test -c playwright.config.ts --project=chromium-p1b",
+    "check:e2e:consolidation-startup-drain-p1c": "playwright test -c playwright.config.ts --project=chromium-p1c",
+    "check:p1c-origin": "tsx scripts/p1c-origin.check.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -36,6 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

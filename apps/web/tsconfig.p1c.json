@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": [
+    "vite.p1c.config.ts",
+    "e2e/helpers/p1cApiOrigin.ts",
+    "e2e/helpers/p1cMockApi.ts",
+    "e2e/helpers/p1cMockServe.ts",
+    "e2e/helpers/p1cBatch.ts",
+    "e2e/helpers/p1cLaunch.ts",
+    "e2e/consolidation-startup-drain.p1c.spec.ts",
+    "scripts/p1c-origin.check.ts"
+  ]
+}

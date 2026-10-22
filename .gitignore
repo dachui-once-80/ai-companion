@@ -11,3 +11,6 @@ dist/
 /apps/server/companion.db-journal
 
 .local/
+
+# Playwright P0（独立 profile／产物；禁止当作日常浏览器目录）
+apps/web/.playwright/
